@@ -5,59 +5,6 @@ Advanced multi-agent system for comprehensive financial analysis using LangChain
 - multi-agent collaboration: allows each agent to perform sentiment, fundamental, valuation and risk analysis.
 - multi-agent debate: Round-robin debate rounds between agents supervised by debate manager for final concensus on financial risks and investment recommendations.
 
-<!-- ## 📁 Project Structure
-
-```
-multi-agent-finance-risk-analysis/
-├── README.md                        # This documentation
-├── requirements.txt                 # Python dependencies
-├── .env.example                    # Environment variables template
-├── src/
-│   ├── __init__.py
-│   ├── main.py                     # Main application entry point
-│   ├── config.py                   # LLM and API configuration
-│   ├── schemas.py                  # Pydantic data models
-│   ├── agents.py                   # Multi-agent definitions
-│   │   ├── data_agent()           # Market data and news retrieval
-│   │   ├── fundamental_agent()    # RAG-powered 10-K/10-Q analysis
-│   │   ├── sentiment_agent()      # News sentiment analysis
-│   │   ├── valuation_agent()      # Technical analysis metrics
-│   │   ├── risk_agent()           # Risk assessment calculations
-│   │   └── writer_agent()         # Final report generation
-│   ├── tools.py                    # LangChain tools and utilities
-│   ├── rag_utils.py               # RAG system for fundamental analysis
-│   │   ├── FundamentalRAG         # Main RAG class
-│   │   ├── ingest_document()      # Single document ingestion
-│   │   ├── retrieve_relevant_chunks() # Document querying
-│   │   └── initialize_sample_data() # Sample data setup
-│   └── __pycache__/               # Python bytecode cache
-├── data/                          # Data storage directory
-│   ├── chroma_db/                # ChromaDB vector database (auto-created)
-│   ├── sample_filings/           # Sample text files (auto-created)
-│   └── filings/                  # Your PDF documents (create manually)
-└── .venv/                        # Virtual environment (auto-created)
-``` -->
-
-<!-- ## 🚀 Agent Workflow
-
-The system processes analysis through these specialized agents:
-
-1. **Data Agent** → Fetches market data and recent news
-2. **Fundamental Agent** → Analyzes 10-K/10-Q filings using RAG
-3. **Sentiment Agent** → Analyzes news sentiment with reflection
-4. **Valuation Agent** → Computes technical analysis metrics
-5. **Risk Agent** → Calculates risk metrics and flags
-6. **Writer Agent** → Generates comprehensive markdown report
-
-## 🌟 Key Features
-
-- **Multi-Agent Architecture**: Specialized agents for different analysis types
-- **RAG-Powered Fundamental Analysis**: Analyzes 10-K/10-Q SEC filings using vector search
-- **Real-Time Data Integration**: Live news, market data, and sentiment analysis
-- **Risk Assessment**: Traditional financial risk metrics with automated flags
-- **LangSmith Integration**: Complete workflow tracing and debugging
-- **Document Ingestion**: Custom tools for ingesting financial documents -->
-
 ## 🤖 Agent Overview
 
 The system employs 6 specialized agents that work together:
@@ -70,16 +17,6 @@ The system employs 6 specialized agents that work together:
 | **Valuation Agent** | Technical analysis | Volatility calculations, trend analysis, price metrics |
 | **Risk Agent** | Risk assessment | VaR calculations, drawdown analysis, risk flags |
 | **Writer Agent** | Report generation | Comprehensive markdown reports, final analysis compilation |
-
-<!-- ### Fundamental Agent Highlights
-
-The **Fundamental Agent** is powered by a sophisticated RAG (Retrieval-Augmented Generation) system:
-
-- 🔍 **Semantic Search**: ChromaDB vector database for intelligent document retrieval
-- 📊 **Comprehensive Analysis**: Automated extraction of financial metrics, risk factors, and business insights
-- 🛠️ **Efficient Querying**: Batched queries to minimize API calls and maximize information retrieval
-- 📈 **Health Scoring**: Automated financial health scoring (0-10 scale)
-- 🎯 **Investment Thesis**: AI-generated investment recommendations based on SEC filings -->
 
 ## 📋 Prerequisites
 
