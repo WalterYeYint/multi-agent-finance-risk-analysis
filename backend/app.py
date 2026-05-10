@@ -9,6 +9,7 @@ import requests
 import io
 import base64
 import openai
+import json
 
 # Ensure we can import project code from src/
 PROJECT_ROOT = os.path.abspath(os.path.join(os.path.dirname(__file__), '..'))
@@ -187,6 +188,14 @@ def analyze_stock():
             raise payload
 
         final_state = payload
+
+        # with open('final_state_with_debate.json', 'r') as final_state_json:
+        #     final_state = json.load(final_state_json)
+        # pdf = MarkdownPdf(toc_level=2, optimize=True)
+        # pdf.add_section(Section(final_state["report"]["markdown_report"]))
+        # out_pdf = io.BytesIO()
+        # pdf.save_bytes(out_pdf)
+        # out_pdf.seek(0)
 
         # ✅ Fix: normalize final_state to dict if needed
         if not isinstance(final_state, dict):

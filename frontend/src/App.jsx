@@ -1,7 +1,22 @@
-import React, { useState, useEffect } from 'react';
+import React, { useState, useEffect, useMemo } from 'react';
 import axios from 'axios';
 import ReactMarkdown from 'react-markdown';
 import jsPDF from 'jspdf';
+import {
+  Activity,
+  AlertTriangle,
+  ArrowDown,
+  ArrowUp,
+  BarChart3,
+  Database,
+  Download,
+  FileText,
+  GitBranch,
+  Newspaper,
+  ShieldCheck,
+  Sparkles,
+  TrendingUp,
+} from 'lucide-react';
 import './App.css';
 
 const initialFormState = {
@@ -10,6 +25,67 @@ const initialFormState = {
     interval: '1d',
     horizon_days: 30,
     mode: 'chain' // change this to chain or debate mode
+};
+
+const RESULT_PAGES = [
+  { id: 'overview', label: 'Executive Overview', icon: BarChart3 },
+  { id: 'market', label: 'Market Intelligence', icon: TrendingUp },
+  { id: 'report', label: 'Full Report', icon: FileText },
+  { id: 'debate', label: 'Agent Debate', icon: GitBranch },
+  { id: 'raw', label: 'Raw Data', icon: Database },
+];
+
+const toNumber = (value) => {
+  if (typeof value === 'number') return value;
+  const parsed = Number(value);
+  return Number.isFinite(parsed) ? parsed : null;
+};
+
+const toPercent = (value, digits = 2) => {
+  const numeric = toNumber(value);
+  if (numeric === null) return 'N/A';
+  return `${(numeric * 100).toFixed(digits)}%`;
+};
+
+const toFixedNumber = (value, digits = 2) => {
+  const numeric = toNumber(value);
+  if (numeric === null) return 'N/A';
+  return numeric.toFixed(digits);
+};
+
+const titleize = (value) => {
+  if (!value) return 'N/A';
+  return String(value)
+    .replace(/[_-]/g, ' ')
+    .replace(/\b\w/g, (match) => match.toUpperCase());
+};
+
+const recommendationTone = (text = '') => {
+  const normalized = text.toLowerCase();
+  if (normalized.includes('buy') || normalized.includes('bullish')) return 'positive';
+  if (normalized.includes('sell') || normalized.includes('bearish')) return 'negative';
+  return 'neutral';
+};
+
+const normalizeDebateEntries = (argumentBucket) => {
+  if (!argumentBucket) return [];
+
+  if (Array.isArray(argumentBucket)) {
+    return argumentBucket.map((entry, index) => ({ label: `Round ${index + 1}`, content: entry }));
+  }
+
+  if (typeof argumentBucket === 'object') {
+    return Object.entries(argumentBucket).map(([round, entry], index) => {
+      const numericRound = Number(round);
+      const hasNumericRound = Number.isFinite(numericRound);
+      return {
+        label: hasNumericRound ? `Round ${numericRound + 1}` : `Round ${index + 1}`,
+        content: entry,
+      };
+    });
+  }
+
+  return [];
 };
 
 function App() {
@@ -21,6 +97,7 @@ function App() {
   const [promptStatus, setPromptStatus] = useState(null);
   const [downloading, setDownloading] = useState(false);
   const [providerInfo, setProviderInfo] = useState(null);
+  const [activePage, setActivePage] = useState('overview');
 
   useEffect(() => {
     // Detect active model/provider from backend
@@ -39,9 +116,15 @@ function App() {
     const { name, value } = e.target;
     setFormData(prev => ({
       ...prev,
-      [name]: value
+      [name]: name === 'horizon_days' ? Number(value) : value
     }));
   };
+
+  useEffect(() => {
+    if (result) {
+      setActivePage('overview');
+    }
+  }, [result]);
 
   const parsePrompt = () => {
     if (!prompt.trim()) {
@@ -162,21 +245,21 @@ function App() {
     }
   };
 
-  const handleDownloadPdf2 = () => {
-    if (!result?.report_pdf_base64) return;
-    const link = document.createElement('a');
-    link.href = `data:application/pdf;base64,${result.report_pdf_base64}`;
-    link.download = `AnalysisReport_${result.ticker}.pdf`;
-    link.click();
-  };
-
   const handleDownloadPdf = () => {
-    if (!result?.report?.markdown_report || downloading) {
+    if (downloading || (!result?.report_pdf_base64 && !result?.report?.markdown_report)) {
       return;
     }
 
     setDownloading(true);
     try {
+      if (result?.report_pdf_base64) {
+        const link = document.createElement('a');
+        link.href = `data:application/pdf;base64,${result.report_pdf_base64}`;
+        link.download = `AnalysisReport_${result.ticker || 'stock'}.pdf`;
+        link.click();
+        return;
+      }
+
       const doc = new jsPDF({
         orientation: 'portrait',
         unit: 'pt',
@@ -231,258 +314,450 @@ function App() {
     }
   };
 
+  const riskSummary = useMemo(() => {
+    const annualVol = toNumber(result?.metrics?.annual_vol);
+    const dailyVar = toNumber(result?.metrics?.daily_var_95);
+    const flagsCount = result?.metrics?.risk_flags?.length || 0;
+
+    let posture = 'Moderate';
+    if ((annualVol !== null && annualVol >= 0.3) || (dailyVar !== null && dailyVar <= -0.03) || flagsCount >= 3) {
+      posture = 'Elevated';
+    } else if ((annualVol !== null && annualVol < 0.16) && flagsCount === 0) {
+      posture = 'Contained';
+    }
+
+    return posture;
+  }, [result]);
+
+  const recommendation =
+    result?.debate?.consensus_summary ||
+    result?.sentiment?.investment_recommendation ||
+    'No recommendation available for this run.';
+
+  const resultTicker = result?.ticker || formData.ticker;
+  const reportFindings = result?.report?.key_findings || [];
+  const riskFlags = result?.metrics?.risk_flags || result?.report?.risk_flags || [];
+
   return (
-    <div className="app">
-      <div className="container">
-        {/* Header */}
-        <div className="header">
-          <h1>Multi-Agent Finance Risk Analysis</h1>
-          <p>
-            {providerInfo?.provider === 'openai'
-              ? `Using Model: OpenAI ${providerInfo.current_model}`
-              : providerInfo?.provider === 'ollama'
-              ? `Using Model: Ollama ${providerInfo.current_model}`
-              : 'Model provider unknown'}
-          </p>
+    <div className="app-shell">
+      <header className="topbar">
+        <div>
+          <h1>Multi-Agent Finance Risk Studio</h1>
+          <p>Institution-style risk intelligence powered by collaborative AI agents.</p>
         </div>
+        <div className="provider-badge">
+          <Sparkles size={16} />
+          {providerInfo?.provider === 'openai'
+            ? `OpenAI • ${providerInfo.current_model}`
+            : providerInfo?.provider === 'ollama'
+            ? `Ollama • ${providerInfo.current_model}`
+            : 'Provider unknown'}
+        </div>
+      </header>
 
-        {/* Input Form */}
-        <div className="form-container">
-          <h2>Analysis Parameters</h2>
+      <div className="workspace-layout">
+        <aside className="control-panel">
+          <section className="panel-card">
+            <h2>Run Analysis</h2>
+            {/* <p>Type naturally or configure fields manually.</p>
 
-          <div className="prompt-helper">
-            <label htmlFor="prompt">Describe your request</label>
-            <textarea
-              id="prompt"
-              placeholder='e.g., "Give me AAPL stock for the last 2 years at intervals of 1 day with a 45 day risk horizon."'
-              value={prompt}
-              onChange={(e) => setPrompt(e.target.value)}
-            />
-            <button type="button" className="prompt-btn" onClick={parsePrompt}>
-              Apply Prompt
-            </button>
-            {promptStatus && (
-              <div className={`prompt-status ${promptStatus.type}`}>
-                {promptStatus.message}
-              </div>
-            )}
-          </div>
-          
-          <form onSubmit={handleSubmit} className="form">
-            <div className="form-group">
-              <label>Stock Ticker</label>
-              <input
-                type="text"
-                name="ticker"
-                value={formData.ticker}
-                onChange={handleInputChange}
-                placeholder="e.g., AAPL, MSFT, GOOGL"
-                required
+            <div className="prompt-helper">
+              <label htmlFor="prompt">Natural language prompt</label>
+              <textarea
+                id="prompt"
+                placeholder='e.g. "Analyze GOOGL for last 3 months at daily interval with 30 day horizon"'
+                value={prompt}
+                onChange={(e) => setPrompt(e.target.value)}
               />
-            </div>
-
-            <div className="form-group">
-              <label>Time Period</label>
-              <select
-                name="period"
-                value={formData.period}
-                onChange={handleInputChange}
-              >
-                <option value="1d">1 Day</option>
-                <option value="5d">5 Days</option>
-                <option value="1mo">1 Month</option>
-                <option value="3mo">3 Months</option>
-                <option value="6mo">6 Months</option>
-                <option value="1y">1 Year</option>
-                <option value="2y">2 Years</option>
-              </select>
-            </div>
-
-            <div className="form-group">
-              <label>Interval</label>
-              <select
-                name="interval"
-                value={formData.interval}
-                onChange={handleInputChange}
-              >
-                <option value="1m">1 Minute</option>
-                <option value="5m">5 Minutes</option>
-                <option value="15m">15 Minutes</option>
-                <option value="30m">30 Minutes</option>
-                <option value="1h">1 Hour</option>
-                <option value="1d">1 Day</option>
-                <option value="1wk">1 Week</option>
-              </select>
-            </div>
-
-            <div className="form-group">
-              <label>Risk Horizon (Days)</label>
-              <input
-                type="number"
-                name="horizon_days"
-                value={formData.horizon_days}
-                onChange={handleInputChange}
-                min="1"
-                max="365"
-                required
-              />
-            </div>
-
-            <div className="form-group" style={{ display: 'none' }}>
-              <label>Agent Mode</label>
-              <select
-                name="mode"
-                value={formData.mode}
-                onChange={handleInputChange}
-              >
-                <option value="chain">Standard Pipeline</option>
-                <option value="debate">Leader Debate</option>
-              </select>
-            </div>
-
-            <button type="submit" disabled={loading} className="submit-btn">
-              {loading ? 'Analyzing...' : '📈 Analyze Stock Risk'}
-            </button>
-            {result?.report?.markdown_report && (
-              <button
-                type="button"
-                className="download-btn"
-                onClick={handleDownloadPdf2}
-                disabled={downloading}
-              >
-                {downloading ? 'Preparing PDF…' : '📄 Download Report PDF'}
+              <button type="button" className="secondary-btn" onClick={parsePrompt}>
+                Apply Prompt
               </button>
-            )}
-          </form>
-        </div>
-
-        {/* Error Display */}
-        {error && (
-          <div className="error">
-            <strong>Error:</strong> {error}
-          </div>
-        )}
-
-        {/* Results Display */}
-        {result && (
-          <div className="results">
-            {/* Summary Cards */}
-            <div className="summary-cards">
-              <div className="card">
-                <h3>Cumulative Return</h3>
-                <p className={result.valuation?.cumulative_return >= 0 ? 'positive' : 'negative'}>
-                  {(result.valuation?.cumulative_return * 100).toFixed(2)}%
-                </p>
-              </div>
-
-              <div className="card">
-                <h3>Annualized Volatility</h3>
-                <p className="volatility">
-                  {(result.valuation?.annualized_volatility * 100).toFixed(1)}%
-                </p>
-              </div>
-
-              <div className="card">
-                <h3>Price Trend</h3>
-                <p className="trend">{result.valuation?.price_trend}</p>
-              </div>
-
-              <div className="card">
-                <h3>Risk Flags</h3>
-                <p className="risk-flags">{result.metrics?.risk_flags?.length || 0}</p>
-              </div>
-            </div>
-
-            <div className="summary-cards">
-              <div className="card">
-                <h3>Investment Recommendation</h3>
-                <p className="card-text-regular">
-                  {result.debate?.consensus_summary}
-                </p>
-              </div>
-            </div>
-
-            <details className="raw-data">
-              <summary>Agent Orchestration</summary>
-              <div className="graph-card">
-                <div style={{ display: 'flex', gap: '20px' }}>
-                  <div style={{ flex: 1}}>
-                    <h3>Collaboration Workflow</h3>
-                    <img
-                      src={`/visualizations/langgraph_collaboration.png`}
-                      alt={`Collaboration workflow`}
-                    />
-                  </div>
-
-                  <div style={{ flex: 2 }}>
-                    <h3>Debate Workflow</h3>
-                    <img
-                      src={`/visualizations/langgraph_debate.png`}
-                      alt={`Debate workflow`}
-                    />
-                  </div>
+              {promptStatus && (
+                <div className={`status-banner ${promptStatus.type}`}>
+                  {promptStatus.message}
                 </div>
-              </div>
-            </details>
-
-            {/* Detailed Report */}
-            <details className="raw-data">
-              <summary>Detailed Risk Analysis Report</summary>
-              <div className="report">
-                <h2>Detailed Risk Analysis Report</h2>
-                <div className="markdown-content">
-                  <ReactMarkdown>{result.report?.markdown_report}</ReactMarkdown>
-                </div>
-              </div>
-
-              {result.agent_arguments && (
-                <details className="debate-log">
-                  <summary>Debate Transcript</summary>
-                  <div>
-                    {Object.entries(result.agent_arguments).filter(([agentName]) => agentName !== 'debate_manager').map(([agentName, agentArgs]) => (
-                      <div key={agentName} style={{ marginBottom: '20px' }}>
-                        <h4 style={{ color: '#2c3e50', marginBottom: '10px', textTransform: 'capitalize' }}>
-                          {agentName} Agent
-                        </h4>
-                        <ul>
-                          {Object.entries(agentArgs).map(([round, argument]) => (
-                            <li key={`${agentName}-${round}`} style={{ marginBottom: '8px' }}>
-                              <strong>Round {parseInt(round) + 1}:</strong> {argument}
-                            </li>
-                          ))}
-                        </ul>
-                      </div>
-                    ))}
-                    {Object.entries(result.agent_arguments).filter(([agentName]) => agentName == 'debate_manager').map(([agentName, agentArgs]) => {
-                      const rounds = Object.entries(agentArgs);
-                      const lastRoundIndex = rounds.length - 1;
-                      return (
-                        <div key={agentName} style={{ marginBottom: '20px' }}>
-                          <h4 style={{ color: '#2c3e50', marginBottom: '10px', textTransform: 'capitalize' }}>
-                            {agentName}
-                          </h4>
-                          <ul>
-                            {Object.entries(agentArgs).map(([round, argument], index) => (
-                              <li key={`${agentName}-${round}`} style={{ marginBottom: '8px' }}>
-                                <strong>{index === lastRoundIndex ? 'Final Consensus:' : `Round ${parseInt(round) + 1}:`}</strong> {argument}
-                              </li>
-                            ))}
-                          </ul>
-                        </div>
-                      );
-                    })}
-                  </div>
-                </details>
               )}
-            </details>
+            </div> */}
 
-            {/* Raw Data */}
-            <details className="raw-data">
-              <summary>Raw Analysis Data</summary>
-              <pre>{JSON.stringify(result, null, 2)}</pre>
-            </details>
-          </div>
-        )}
+            <form onSubmit={handleSubmit} className="input-form">
+              <div className="form-group">
+                <label>Ticker</label>
+                <input
+                  type="text"
+                  name="ticker"
+                  value={formData.ticker}
+                  onChange={handleInputChange}
+                  placeholder="AAPL, MSFT, GOOGL"
+                  required
+                />
+              </div>
+
+              <div className="form-group">
+                <label>Period</label>
+                <select name="period" value={formData.period} onChange={handleInputChange}>
+                  <option value="1d">1 Day</option>
+                  <option value="5d">5 Days</option>
+                  <option value="1mo">1 Month</option>
+                  <option value="3mo">3 Months</option>
+                  <option value="6mo">6 Months</option>
+                  <option value="1y">1 Year</option>
+                  <option value="2y">2 Years</option>
+                </select>
+              </div>
+
+              <div className="form-group">
+                <label>Interval</label>
+                <select name="interval" value={formData.interval} onChange={handleInputChange}>
+                  <option value="1m">1 Minute</option>
+                  <option value="5m">5 Minutes</option>
+                  <option value="15m">15 Minutes</option>
+                  <option value="30m">30 Minutes</option>
+                  <option value="1h">1 Hour</option>
+                  <option value="1d">1 Day</option>
+                  <option value="1wk">1 Week</option>
+                </select>
+              </div>
+
+              <div className="form-group">
+                <label>Risk Horizon (days)</label>
+                <input
+                  type="number"
+                  name="horizon_days"
+                  value={formData.horizon_days}
+                  onChange={handleInputChange}
+                  min="1"
+                  max="365"
+                  required
+                />
+              </div>
+
+              <button type="submit" disabled={loading} className="primary-btn">
+                {loading ? 'Analyzing…' : 'Analyze Risk'}
+              </button>
+
+              {(result?.report?.markdown_report || result?.report_pdf_base64) && (
+                <button
+                  type="button"
+                  className="ghost-btn"
+                  onClick={handleDownloadPdf}
+                  disabled={downloading}
+                >
+                  <Download size={16} />
+                  {downloading ? 'Preparing PDF…' : 'Download Report PDF'}
+                </button>
+              )}
+            </form>
+          </section>
+
+          <section className="panel-card quick-facts">
+            <h3>Session Snapshot</h3>
+            <div className="mini-metric">
+              <span>Ticker</span>
+              <strong>{resultTicker || '—'}</strong>
+            </div>
+            <div className="mini-metric">
+              <span>Period</span>
+              <strong>{formData.period}</strong>
+            </div>
+            <div className="mini-metric">
+              <span>Horizon</span>
+              <strong>{formData.horizon_days} days</strong>
+            </div>
+            <div className="mini-metric">
+              <span>Risk Posture</span>
+              <strong>{result ? riskSummary : '—'}</strong>
+            </div>
+          </section>
+        </aside>
+
+        <main className="results-panel">
+          {error && (
+            <div className="error-banner">
+              <AlertTriangle size={18} />
+              <span>{error}</span>
+            </div>
+          )}
+
+          {!result && !loading && (
+            <section className="empty-state">
+              <h2>Ready for analysis</h2>
+              <p>Run a ticker analysis to see executive dashboards, market intelligence, debate logs, and export-ready reports.</p>
+              <div className="workflow-grid">
+                <article>
+                  <h4>Collaboration Workflow</h4>
+                  <img src="/visualizations/langgraph_collaboration.png" alt="Collaboration workflow" />
+                </article>
+                <article>
+                  <h4>Debate Workflow</h4>
+                  <img src="/visualizations/langgraph_debate.png" alt="Debate workflow" />
+                </article>
+              </div>
+            </section>
+          )}
+
+          {result && (
+            <>
+              <section className="result-header">
+                <div>
+                  <h2>{resultTicker} Risk Intelligence</h2>
+                  <p>
+                    {result?.report?.as_of ? `Last refreshed ${result.report.as_of}` : 'Latest run completed'}
+                  </p>
+                </div>
+                <div className={`recommendation-chip ${recommendationTone(recommendation)}`}>
+                  <ShieldCheck size={16} />
+                  <span>{titleize(result?.sentiment?.investment_recommendation || 'monitor')}</span>
+                </div>
+              </section>
+
+              <nav className="result-nav" aria-label="Result pages">
+                {RESULT_PAGES.map((page) => {
+                  const Icon = page.icon;
+                  return (
+                    <button
+                      key={page.id}
+                      type="button"
+                      className={`result-nav-item ${activePage === page.id ? 'active' : ''}`}
+                      onClick={() => setActivePage(page.id)}
+                    >
+                      <Icon size={16} />
+                      {page.label}
+                    </button>
+                  );
+                })}
+              </nav>
+
+              {activePage === 'overview' && (
+                <section className="page-grid">
+                  <div className="kpi-grid">
+                    <article className="kpi-card">
+                      <span>Cumulative Return</span>
+                      <strong className={toNumber(result?.valuation?.cumulative_return) >= 0 ? 'positive' : 'negative'}>
+                        {toPercent(result?.valuation?.cumulative_return)}
+                      </strong>
+                      <small>{toNumber(result?.valuation?.cumulative_return) >= 0 ? 'Positive momentum' : 'Recent contraction'}</small>
+                    </article>
+
+                    <article className="kpi-card">
+                      <span>Annualized Volatility</span>
+                      <strong>{toPercent(result?.valuation?.annualized_volatility, 1)}</strong>
+                      <small>{titleize(result?.valuation?.volatility_regime)} regime</small>
+                    </article>
+
+                    <article className="kpi-card">
+                      <span>95% Daily VaR</span>
+                      <strong>{toPercent(result?.metrics?.daily_var_95, 2)}</strong>
+                      <small>Downside estimate</small>
+                    </article>
+
+                    <article className="kpi-card">
+                      <span>Sharpe-like</span>
+                      <strong>{toFixedNumber(result?.metrics?.sharpe_like, 3)}</strong>
+                      <small>Risk-adjusted return signal</small>
+                    </article>
+
+                    <article className="kpi-card">
+                      <span>Sentiment Confidence</span>
+                      <strong>{toPercent(result?.sentiment?.confidence_score)}</strong>
+                      <small>{titleize(result?.sentiment?.overall_sentiment)}</small>
+                    </article>
+
+                    <article className="kpi-card">
+                      <span>Risk Flags</span>
+                      <strong>{riskFlags.length}</strong>
+                      <small>{riskFlags.length ? 'Items require attention' : 'No critical flags detected'}</small>
+                    </article>
+                  </div>
+
+                  <article className="content-card">
+                    <h3>Executive Recommendation</h3>
+                    <p>{recommendation}</p>
+                  </article>
+
+                  <article className="content-card">
+                    <h3>Key Findings</h3>
+                    {reportFindings.length > 0 ? (
+                      <ul className="list-clean">
+                        {reportFindings.map((finding, index) => (
+                          <li key={`finding-${index}`}>
+                            <Activity size={14} />
+                            <span>{finding}</span>
+                          </li>
+                        ))}
+                      </ul>
+                    ) : (
+                      <p>No key findings were generated for this run.</p>
+                    )}
+                  </article>
+
+                  <article className="content-card">
+                    <h3>Risk Flags</h3>
+                    {riskFlags.length > 0 ? (
+                      <div className="tag-list">
+                        {riskFlags.map((flag, index) => (
+                          <span key={`flag-${index}`} className="tag warning">
+                            <AlertTriangle size={12} />
+                            {flag}
+                          </span>
+                        ))}
+                      </div>
+                    ) : (
+                      <div className="tag-list">
+                        <span className="tag success">
+                          <ShieldCheck size={12} />
+                          No elevated risk flags
+                        </span>
+                      </div>
+                    )}
+                  </article>
+                </section>
+              )}
+
+              {activePage === 'market' && (
+                <section className="page-grid">
+                  <article className="content-card">
+                    <h3>Valuation Signals</h3>
+                    <div className="metric-rows">
+                      <div>
+                        <span>Trend</span>
+                        <strong>{titleize(result?.valuation?.price_trend)}</strong>
+                      </div>
+                      <div>
+                        <span>Analysis Period</span>
+                        <strong>{result?.valuation?.analysis_period || formData.period}</strong>
+                      </div>
+                      <div>
+                        <span>Trading Days</span>
+                        <strong>{result?.valuation?.trading_days ?? 'N/A'}</strong>
+                      </div>
+                      <div>
+                        <span>Annual Return</span>
+                        <strong>{toPercent(result?.valuation?.annualized_return)}</strong>
+                      </div>
+                    </div>
+                    <div className="insight-row">
+                      <h4>Valuation Insights</h4>
+                      <ul className="list-clean">
+                        {(result?.valuation?.valuation_insights || []).map((insight, index) => (
+                          <li key={`valuation-${index}`}>
+                            {toNumber(result?.valuation?.cumulative_return) >= 0 ? <ArrowUp size={14} /> : <ArrowDown size={14} />}
+                            <span>{insight}</span>
+                          </li>
+                        ))}
+                      </ul>
+                    </div>
+                  </article>
+
+                  <article className="content-card">
+                    <h3>Sentiment Summary</h3>
+                    <div className="metric-rows">
+                      <div>
+                        <span>Overall Sentiment</span>
+                        <strong>{titleize(result?.sentiment?.overall_sentiment)}</strong>
+                      </div>
+                      <div>
+                        <span>News Items</span>
+                        <strong>{result?.sentiment?.news_items_analyzed ?? result?.news?.items?.length ?? 0}</strong>
+                      </div>
+                      <div>
+                        <span>Recommendation</span>
+                        <strong>{titleize(result?.sentiment?.investment_recommendation)}</strong>
+                      </div>
+                    </div>
+                    <ul className="list-clean">
+                      {(result?.sentiment?.key_insights || []).map((insight, index) => (
+                        <li key={`sentiment-${index}`}>
+                          <Sparkles size={14} />
+                          <span>{insight}</span>
+                        </li>
+                      ))}
+                    </ul>
+                  </article>
+
+                  <article className="content-card full-width">
+                    <h3>
+                      <Newspaper size={16} />
+                      Recent Headlines
+                    </h3>
+                    {(result?.news?.items || []).length > 0 ? (
+                      <div className="headline-list">
+                        {result.news.items.slice(0, 12).map((item, index) => (
+                          <div key={`news-${index}`} className="headline-item">
+                            <p className="headline-title">{item.headline}</p>
+                            <div className="headline-meta">
+                              <span>{item.date || 'Unknown date'}</span>
+                              <span className={`tag ${recommendationTone(item.sentiment)}`}>
+                                {titleize(item.sentiment)}
+                              </span>
+                            </div>
+                          </div>
+                        ))}
+                      </div>
+                    ) : (
+                      <p>No market headlines were available for this run.</p>
+                    )}
+                  </article>
+                </section>
+              )}
+
+              {activePage === 'report' && (
+                <section className="page-grid">
+                  <article className="content-card full-width">
+                    <h3>Detailed Risk Analysis Report</h3>
+                    <div className="markdown-content">
+                      <ReactMarkdown>{result?.report?.markdown_report || 'No markdown report available.'}</ReactMarkdown>
+                    </div>
+                  </article>
+                </section>
+              )}
+
+              {activePage === 'debate' && (
+                <section className="page-grid">
+                  <article className="content-card full-width">
+                    <h3>Debate Consensus</h3>
+                    <p>{result?.debate?.consensus_summary || 'Debate mode was not enabled for this run.'}</p>
+                  </article>
+
+                  {result?.debate?.agent_arguments ? (
+                    Object.entries(result.debate.agent_arguments).map(([agentName, bucket]) => {
+                      const entries = normalizeDebateEntries(bucket);
+                      return (
+                        <article key={agentName} className="content-card full-width">
+                          <h3>{titleize(agentName)}</h3>
+                          {entries.length > 0 ? (
+                            <ul className="list-clean debate-list">
+                              {entries.map((entry, index) => (
+                                <li key={`${agentName}-${index}`}>
+                                  <strong>{entry.label}:</strong>
+                                  <span>{entry.content}</span>
+                                </li>
+                              ))}
+                            </ul>
+                          ) : (
+                            <p>No arguments available.</p>
+                          )}
+                        </article>
+                      );
+                    })
+                  ) : (
+                    <article className="content-card full-width">
+                      <p>No debate transcript was generated for this run.</p>
+                    </article>
+                  )}
+                </section>
+              )}
+
+              {activePage === 'raw' && (
+                <section className="page-grid">
+                  <article className="content-card full-width">
+                    <h3>Raw Analysis Payload</h3>
+                    <pre className="raw-json">{JSON.stringify(result, null, 2)}</pre>
+                  </article>
+                </section>
+              )}
+            </>
+          )}
+        </main>
       </div>
     </div>
   );
