@@ -48,7 +48,34 @@ python -m pip install -U pip
 bash setup.sh
 ```
 
-### 4. Setting up Ollama (Free Local Models)
+### 4. Start the Postgres + pgvector database (RAG store)
+
+The fundamental-analysis RAG stores 10-K/10-Q filings in Postgres with the
+`pgvector` extension. A `docker-compose.yml` is provided to run it locally:
+
+```bash
+# Start the database in the background
+docker compose up -d
+
+# Verify it is running
+docker compose ps
+
+# Stop it (data persists in the `pgdata` volume)
+docker compose down
+
+# Stop it and wipe all stored filings
+docker compose down -v
+```
+
+Set the connection string in your `.env` (defaults shown):
+
+```bash
+DATABASE_URL=postgresql://finance:finance@localhost:5432/finance_rag
+```
+
+The `filings` and `filing_chunks` tables are created automatically on first use.
+
+### 5. Setting up Ollama (Free Local Models)
 
 1. **Install Ollama**:
    ```bash
@@ -172,9 +199,25 @@ npm start
 🔸 See pdf files in `sample_outputs/` for sample  outputs.
 
 ## Saving 10K/10Q Documents
-New 10K/10Q documents must be stored in data/filings directory in `ticker-filing_type-filing_freq-filing_start_month-filing_end_month-filing_year.pdf` format.
 
-E.g. AAPL-10Q-Q3-4-6-2025.pdf
+There are two ways to add filings to the RAG store (Postgres + pgvector — make
+sure the database is running, see installation step 4).
+
+**Option A — auto-ingest from SEC EDGAR (recommended).** Downloads filings
+straight from the free SEC EDGAR API:
+
+```bash
+python -m src.utils.edgar_ingest --tickers AAPL,MSFT,GOOGL --forms 10-K,10-Q --limit 4
+```
+
+It is idempotent (filings already stored are skipped), so it is safe to re-run
+or schedule on a cron. Set `SEC_USER_AGENT` in `.env` to a real contact string
+(e.g. `"Your Name your-email@example.com"`) — SEC throttles requests without one.
+
+**Option B — manual PDFs.** Store PDFs in the `data/filings` directory in
+`ticker-filing_type-filing_freq-filing_start_month-filing_end_month-filing_year.pdf`
+format, e.g. `AAPL-10Q-Q3-4-6-2025.pdf`. They are ingested automatically the
+first time a ticker with no stored filings is analyzed.
 
 ## Running Integration Test
 Integration test can be run to verify how accurate the system's recommendations are.

@@ -108,12 +108,14 @@ overrides==7.7.0
 packaging==25.0
 pandas==2.3.3
 peewee==3.18.2
+pgvector==0.3.6
 pillow==11.3.0
 platformdirs==4.5.0
 plotly==6.3.1
 posthog==5.4.0
 propcache==0.4.1
 protobuf==6.33.0
+psycopg[binary]==3.2.3
 pyarrow==22.0.0
 pyasn1==0.6.1
 pyasn1_modules==0.4.2

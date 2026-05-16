@@ -3,10 +3,11 @@ import yfinance as yf
 import requests
 import json
 import re
+import calendar
 import numpy as np
 import pandas as pd
 from io import StringIO
-from datetime import datetime, timedelta
+from datetime import datetime, timedelta, date
 from dateutil.relativedelta import relativedelta
 from typing import List, Dict, Any, Union
 from langchain_core.tools import tool
@@ -428,33 +429,36 @@ def query_10k_documents(ticker: str, query: str, from_month: int, from_year: int
     """
     try:
         from utils.rag_utils import FundamentalRAG
-        import ast
-        
-        # Initialize RAG system
-        rag_system = FundamentalRAG()
-        
-        # Handle string representation of list (common when passed from agent tools)
-        if isinstance(query, str) and ',' in query:
-            query_list = [q.strip() for q in query.split(',')]
-            print(f"Parsed string list into actual list: {query_list}")
-    
-            # Multiple queries - return list of results
-            results = []
-            for q in query_list:
-                chunks = rag_system.retrieve_relevant_chunks(ticker, q, from_year=from_year, from_month=from_month,
-                                                             to_year=to_year, to_month=to_month)
-                if chunks:
-                    # Format chunks into readable text
-                    result = "\n---DOCUMENT SECTION---\n".join([
-                        chunk.page_content for chunk in chunks
-                    ])
-                    results.append(f"Retrieved relevant info for {ticker}'s 10K/10Q filing:{q}:\n\n {result}")
-                else:
-                    results.append(f"No relevant information found for query: {q}")
-            return results
-        else:
+
+        # Queries arrive as a single comma-separated string from the agent.
+        if not (isinstance(query, str) and ',' in query):
             return "Error: Query must be a string of comma separated values."
-            
+        query_list = [q.strip() for q in query.split(',') if q.strip()]
+        print(f"Parsed query string into list: {query_list}")
+
+        # The LLM supplies month/year ints; convert to a concrete date window.
+        from_month = min(max(int(from_month), 1), 12)
+        to_month = min(max(int(to_month), 1), 12)
+        from_date = date(int(from_year), from_month, 1)
+        to_date = date(int(to_year), to_month,
+                       calendar.monthrange(int(to_year), to_month)[1])
+
+        rag_system = FundamentalRAG()
+        # One batched embedding call + one DB connection for all sub-queries.
+        chunk_lists = rag_system.retrieve_relevant_chunks_batch(
+            ticker, query_list, from_date=from_date, to_date=to_date)
+
+        results = []
+        for q, chunks in zip(query_list, chunk_lists):
+            if chunks:
+                result = "\n---DOCUMENT SECTION---\n".join(
+                    chunk.page_content for chunk in chunks)
+                results.append(
+                    f"Retrieved relevant info for {ticker}'s 10K/10Q filing:{q}:\n\n {result}")
+            else:
+                results.append(f"No relevant information found for query: {q}")
+        return results
+
     except Exception as e:
         return f"Error querying documents: {str(e)}"
 

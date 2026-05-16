@@ -1,348 +1,400 @@
 """
 RAG utilities for storing and retrieving 10-K/10-Q financial documents.
-Provides document ingestion, vector storage, and retrieval capabilities.
+
+Backed by Postgres + pgvector (see utils/db.py). Filing metadata lives in the
+`filings` table; chunk text and embeddings live in `filing_chunks`. Documents
+can be ingested from local PDFs (batch_ingest_documents) or directly as text
+(ingest_text — used by the SEC EDGAR auto-ingest script, utils/edgar_ingest.py).
 """
 
 import os
 import glob
+import calendar
 from pathlib import Path
 from typing import List, Dict, Any, Optional
-from datetime import datetime
+from datetime import date
 
+import numpy as np
+from psycopg.types.json import Jsonb
 from langchain_community.document_loaders import PyPDFLoader
-from langchain_community.vectorstores import Chroma
 from langchain_core.documents import Document
-from langchain_core.runnables import RunnableConfig
 from langchain_text_splitters import RecursiveCharacterTextSplitter
 
+from utils.config import get_embeddings
+from utils.db import connect, ensure_schema
 
-from utils.config import get_llm, get_embeddings
+
+def _normalize_filing_type(filing_type: str) -> str:
+    """Normalise '10-K'/'10k'/'10-Q' to a dash-free upper form ('10K', '10Q')."""
+    return (filing_type or "").replace("-", "").replace("_", "").upper()
+
+
+def _period_dates_from_months(year: int, start_month: int,
+                              end_month: int) -> tuple[date, date]:
+    """Build a (period_start, period_end) date pair from a year + month range."""
+    last_day = calendar.monthrange(year, end_month)[1]
+    return date(year, start_month, 1), date(year, end_month, last_day)
 
 
 class FundamentalRAG:
-    """
-    RAG system for fundamental analysis using 10-K/10-Q documents.
-    """
-    
-    def __init__(self, persist_directory: str = "./data/chroma_db"):
-        self.persist_directory = persist_directory
+    """RAG system for fundamental analysis using 10-K/10-Q documents."""
+
+    def __init__(self):
         self.embeddings = get_embeddings()
         self.text_splitter = RecursiveCharacterTextSplitter(
             chunk_size=1000,
             chunk_overlap=200,
             length_function=len,
         )
-        self.collection_name = "fundamental_filings_Ollama" if os.getenv("OLLAMA_MODEL") else "fundamental_filings"
-        
-        # Initialize or load existing vector store with dimension compatibility check
+
+        # The pgvector `embedding` column is dimension-agnostic, so chunks from
+        # different embedding providers can coexist. We namespace every chunk by
+        # an `embedding_model` tag that includes the vector dimension, and
+        # retrieval filters on it — distance ops only ever see same-dim vectors.
         try:
-            self.vectorstore = Chroma(
-                collection_name=self.collection_name,
-                persist_directory=persist_directory,
-                embedding_function=self.embeddings
-            )
-            # Test if embeddings are compatible by trying a simple similarity search
-            test_embedding = self.embeddings.embed_query("test")
-            print(f"🔍 Testing ChromaDB compatibility with {len(test_embedding)}-dimensional embeddings")
-            # Try a simple query to check if dimensions match
-            self.vectorstore.similarity_search("test", k=1)
-            print("✅ ChromaDB collection is compatible")
+            self.embedding_dim = len(self.embeddings.embed_query("test"))
         except Exception as e:
-            if "dimension" in str(e).lower() or "expecting embedding with dimension" in str(e):
-                print(f"🔄 Embedding dimension mismatch detected: {str(e)}")
-                print("🔄 Recreating vector store with new embedding dimensions...")
-                # Remove existing collection and create new one
-                import shutil
-                if os.path.exists(persist_directory):
-                    shutil.rmtree(persist_directory)
-                os.makedirs(persist_directory, exist_ok=True)
-                self.vectorstore = Chroma(
-                    persist_directory=persist_directory,
-                    embedding_function=self.embeddings
-                )
-                print("✅ Created new ChromaDB collection")
-            else:
-                raise e
-        
-        # Ensure data directory exists
-        os.makedirs(persist_directory, exist_ok=True)
-        
-    def ingest_document(self, ticker: str, filing_type: str, filing_year: int, filing_start_month: int,
-                        filing_end_month: int, document_path: str) -> bool:
-        """
-        Ingest a 10-K or 10-Q document into the vector store.
-        
-        Args:
-            ticker: Stock ticker symbol
-            filing_type: "10-K" or "10-Q"
-            document_path: Path to the PDF document
-            
-        Returns:
-            bool: Success status
-        """
+            print(f"⚠️  Could not probe embedding dimension: {e}")
+            self.embedding_dim = 0
+        self.embedding_model = f"{self._embedding_provider()}-{self.embedding_dim}d"
+        print(f"🔍 RAG embedding namespace: {self.embedding_model}")
+
+        ensure_schema()
+
+    @staticmethod
+    def _embedding_provider() -> str:
+        """Best-effort label for the active embeddings provider (namespacing only)."""
+        if os.getenv("OPENAI_API_KEY"):
+            return "openai:" + os.getenv("OPENAI_EMBED_MODEL", "text-embedding-ada-002")
+        provider = os.getenv("MODEL_PROVIDER", "").lower()
+        if provider in ("", "auto", "ollama"):
+            return "ollama:" + os.getenv("OLLAMA_EMBED_MODEL", "nomic-embed-text")
+        return provider
+
+    # ----------------------------------------------------------------- ingest
+    def _find_filing_id(self, cur, accession_no, ticker, filing_type,
+                        filing_year, filing_start_month, filing_end_month):
+        """Return the id of an existing filing row, or None."""
+        if accession_no:
+            cur.execute("SELECT id FROM filings WHERE accession_no = %s", (accession_no,))
+            row = cur.fetchone()
+            if row:
+                return row[0]
+        cur.execute(
+            """SELECT id FROM filings
+               WHERE ticker = %s AND filing_type = %s AND filing_year = %s
+                 AND filing_start_month = %s AND filing_end_month = %s""",
+            (ticker, filing_type, filing_year, filing_start_month, filing_end_month),
+        )
+        row = cur.fetchone()
+        return row[0] if row else None
+
+    def _ingest_chunks(self, chunks: List[Document], *, ticker: str, filing_type: str,
+                       filing_year: int, filing_start_month: int, filing_end_month: int,
+                       period_start: date, period_end: date, source: str,
+                       accession_no: Optional[str] = None,
+                       company: Optional[str] = None, force: bool = False) -> bool:
+        """Embed and store chunks for one filing. Idempotent unless force=True."""
+        chunks = [c for c in chunks if c.page_content and c.page_content.strip()]
+        if not chunks:
+            print(f"⚠️  No non-empty chunks to ingest for {ticker} {filing_type}.")
+            return False
+
+        ticker = ticker.upper()
+        filing_type = _normalize_filing_type(filing_type)
+        ensure_schema()
+
         try:
-            # Load PDF document
+            with connect() as conn:
+                with conn.cursor() as cur:
+                    existing_id = self._find_filing_id(
+                        cur, accession_no, ticker, filing_type,
+                        filing_year, filing_start_month, filing_end_month)
+                    if existing_id is not None:
+                        if not force:
+                            print(f"⏭️  {ticker} {filing_type} {filing_year} "
+                                  f"({filing_start_month}-{filing_end_month}) "
+                                  f"already ingested — skipping.")
+                            return True
+                        cur.execute("DELETE FROM filings WHERE id = %s", (existing_id,))
+
+                    cur.execute(
+                        """INSERT INTO filings
+                           (ticker, filing_type, filing_year, filing_start_month,
+                            filing_end_month, period_start, period_end,
+                            accession_no, company, source)
+                           VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
+                           RETURNING id""",
+                        (ticker, filing_type, filing_year, filing_start_month,
+                         filing_end_month, period_start, period_end,
+                         accession_no, company, source),
+                    )
+                    filing_id = cur.fetchone()[0]
+
+                    texts = [c.page_content for c in chunks]
+                    vectors = self.embeddings.embed_documents(texts)
+
+                    rows = []
+                    for idx, (chunk, vec) in enumerate(zip(chunks, vectors)):
+                        meta = dict(chunk.metadata or {})
+                        meta.update({
+                            "ticker": ticker,
+                            "filing_type": filing_type,
+                            "filing_year": filing_year,
+                            "filing_start_month": filing_start_month,
+                            "filing_end_month": filing_end_month,
+                            "source": source,
+                        })
+                        rows.append((
+                            filing_id, ticker, idx, chunk.page_content,
+                            np.asarray(vec, dtype=np.float32),
+                            self.embedding_model, Jsonb(meta),
+                        ))
+
+                    cur.executemany(
+                        """INSERT INTO filing_chunks
+                           (filing_id, ticker, chunk_index, content, embedding,
+                            embedding_model, metadata)
+                           VALUES (%s, %s, %s, %s, %s, %s, %s)""",
+                        rows,
+                    )
+                    cur.execute("UPDATE filings SET num_chunks = %s WHERE id = %s",
+                                (len(rows), filing_id))
+                conn.commit()
+
+            print(f"✅ Ingested {len(chunks)} chunks for {ticker} {filing_type} "
+                  f"{filing_year} (months {filing_start_month}-{filing_end_month})")
+            return True
+
+        except Exception as e:
+            print(f"❌ Error ingesting {ticker} {filing_type}: {e}")
+            return False
+
+    def ingest_document(self, ticker: str, filing_type: str, filing_year: int,
+                        filing_start_month: int, filing_end_month: int,
+                        document_path: str) -> bool:
+        """Ingest a 10-K/10-Q PDF document into the vector store."""
+        try:
             loader = PyPDFLoader(document_path)
             pages = loader.load()
-            
-            # Split documents into chunks
             chunks = self.text_splitter.split_documents(pages)
-            
-            # Add metadata to chunks
-            for chunk in chunks:
-                chunk.metadata.update({
-                    "ticker": ticker.upper(),
-                    "filing_type": filing_type,
-                    "filing_year": filing_year,
-                    "filing_start_month": filing_start_month,
-                    "filing_end_month": filing_end_month,
-                    "source": document_path,
-                    "ingestion_date": datetime.now().isoformat()
-                })
-            
-            # Add to vector store
-            self.vectorstore.add_documents(chunks)
-            
-            print(f"Successfully ingested {len(chunks)} chunks from ticker:{ticker}, filing_type:{filing_type}, " +
-                  f"filing_year:{filing_year} from month {filing_start_month} to month {filing_end_month}")
-            return True
-            
         except Exception as e:
-            print(f"Error ingesting document for {ticker}: {e}")
+            print(f"Error loading PDF for {ticker}: {e}")
             return False
-    
+
+        # PDF filenames only carry a single year, so the period stays within it.
+        period_start, period_end = _period_dates_from_months(
+            filing_year, filing_start_month, filing_end_month)
+        return self._ingest_chunks(
+            chunks, ticker=ticker, filing_type=filing_type, filing_year=filing_year,
+            filing_start_month=filing_start_month, filing_end_month=filing_end_month,
+            period_start=period_start, period_end=period_end, source=document_path,
+        )
+
+    def ingest_text(self, text: str, *, ticker: str, filing_type: str, filing_year: int,
+                    filing_start_month: int, filing_end_month: int,
+                    period_start: date, period_end: date, source: str,
+                    accession_no: Optional[str] = None, company: Optional[str] = None,
+                    force: bool = False) -> bool:
+        """Ingest a filing supplied as raw text (e.g. SEC EDGAR HTML extracted to text)."""
+        doc = Document(page_content=text, metadata={"source": source})
+        chunks = self.text_splitter.split_documents([doc])
+        return self._ingest_chunks(
+            chunks, ticker=ticker, filing_type=filing_type, filing_year=filing_year,
+            filing_start_month=filing_start_month, filing_end_month=filing_end_month,
+            period_start=period_start, period_end=period_end, source=source,
+            accession_no=accession_no, company=company, force=force,
+        )
+
+    def has_filing(self, accession_no: str) -> bool:
+        """Return True if a filing with this SEC accession number is already stored."""
+        if not accession_no:
+            return False
+        ensure_schema()
+        with connect() as conn, conn.cursor() as cur:
+            cur.execute("SELECT 1 FROM filings WHERE accession_no = %s", (accession_no,))
+            return cur.fetchone() is not None
+
+    # --------------------------------------------------------------- retrieve
+    @staticmethod
+    def _build_search_sql(filing_type: Optional[str]) -> str:
+        """Cosine-distance search SQL. A filing matches if its coverage period
+        overlaps [from_date, to_date]: period_end >= from AND period_start <= to."""
+        sql = [
+            "SELECT c.content, c.metadata",
+            "FROM filing_chunks c",
+            "JOIN filings f ON f.id = c.filing_id",
+            "WHERE c.ticker = %(ticker)s",
+            "  AND c.embedding_model = %(model)s",
+            "  AND f.period_end >= %(from_date)s",
+            "  AND f.period_start <= %(to_date)s",
+        ]
+        if filing_type:
+            sql.append("  AND f.filing_type = %(filing_type)s")
+        sql.append("ORDER BY c.embedding <=> %(qvec)s")
+        sql.append("LIMIT %(k)s")
+        return "\n".join(sql)
+
+    @staticmethod
+    def _search(cur, sql: str, base_params: Dict[str, Any],
+                qvec: np.ndarray) -> List[Document]:
+        """Run one similarity search on an open cursor and return Documents."""
+        cur.execute(sql, {**base_params, "qvec": qvec})
+        return [Document(page_content=row[0], metadata=row[1] or {})
+                for row in cur.fetchall()]
+
+    def _diagnose_empty(self, cur, ticker: str) -> None:
+        """Turn a silent zero-result into a clear log line when the cause is an
+        embedding-model namespace mismatch (filings ingested by another provider)."""
+        cur.execute(
+            "SELECT DISTINCT embedding_model FROM filing_chunks WHERE ticker = %s",
+            (ticker.upper(),),
+        )
+        models = [r[0] for r in cur.fetchall()]
+        if models and self.embedding_model not in models:
+            print(f"⚠️  Retrieval for {ticker} found nothing: filings are stored "
+                  f"under embedding model(s) {models}, but the active model is "
+                  f"'{self.embedding_model}'. Re-ingest with the current provider, "
+                  f"or switch the embeddings provider back.")
+
+    def retrieve_relevant_chunks_batch(
+        self,
+        ticker: str,
+        queries: List[str],
+        filing_type: Optional[str] = None,
+        from_date: Optional[date] = None,
+        to_date: Optional[date] = None,
+        k: int = 5,
+    ) -> List[List[Document]]:
+        """
+        Retrieve the top-k chunks for each query in `queries`.
+
+        All queries are embedded in a single `embed_documents` call and all
+        searches run on one reused connection. A filing is in range if its
+        coverage period overlaps [from_date, to_date].
+        """
+        if not queries:
+            return []
+
+        from_date = from_date or date.min
+        to_date = to_date or date.today()
+
+        vectors = self.embeddings.embed_documents(list(queries))
+        sql = self._build_search_sql(filing_type)
+        base_params: Dict[str, Any] = {
+            "ticker": ticker.upper(),
+            "model": self.embedding_model,
+            "from_date": from_date,
+            "to_date": to_date,
+            "k": k,
+        }
+        if filing_type:
+            base_params["filing_type"] = _normalize_filing_type(filing_type)
+
+        ensure_schema()
+        with connect() as conn, conn.cursor() as cur:
+            results = [
+                self._search(cur, sql, base_params,
+                             np.asarray(vec, dtype=np.float32))
+                for vec in vectors
+            ]
+            if not any(results):
+                self._diagnose_empty(cur, ticker)
+        return results
+
     def retrieve_relevant_chunks(
         self,
         ticker: str,
         query: str,
         filing_type: Optional[str] = None,
-        from_year: Optional[int] = datetime.now().year,
-        from_month: Optional[int] = 1,
-        to_year: Optional[int] = datetime.now().year,
-        to_month: Optional[int] = 12,
-        k: int = 5
+        from_date: Optional[date] = None,
+        to_date: Optional[date] = None,
+        k: int = 5,
     ) -> List[Document]:
-        """
-        Retrieve relevant document chunks for a given query within a date range.
+        """Retrieve the top-k chunks for a single query (see the batch variant)."""
+        batch = self.retrieve_relevant_chunks_batch(
+            ticker, [query], filing_type=filing_type,
+            from_date=from_date, to_date=to_date, k=k)
+        return batch[0] if batch else []
 
-        Args:
-            ticker: Stock ticker symbol
-            query: Search query
-            filing_type: Optional filing type filter ("10-K" or "10-Q")
-            from_year: Start year (inclusive)
-            from_month: Start month (inclusive)  
-            to_year: End year (inclusive)
-            to_month: End month (inclusive)
-            k: Number of chunks to retrieve
-            
-        Returns:
-            List of relevant document chunks
-        """
-        try:
-            # Build base filter
-            filter_conditions: list[Any] = [{"ticker": ticker.upper()}]
-            
-            if filing_type:
-                filter_conditions.append({"filing_type": filing_type})
-            
-            # Add date range filters
-            if from_year is not None:
-                if from_year == datetime.now().year and from_month > datetime.now().month - 3:
-                    from_month = datetime.now().month - 3
-                # Documents that end after the start period
-                filter_conditions.append({
-                    "$or": [
-                        {"filing_year": {"$gt": from_year}},
-                        {
-                            "$and": [
-                                {"filing_year": from_year},
-                                {"filing_end_month": {"$gte": from_month}}
-                            ]
-                        }
-                    ]
-                })
-            
-            if to_year is not None:
-                # Documents that start before the end period
-                filter_conditions.append({
-                    "$or": [
-                        {"filing_year": {"$lt": to_year}},
-                        {
-                            "$and": [
-                                {"filing_year": to_year},
-                                {"filing_start_month": {"$lte": to_month}}
-                            ]
-                        }
-                    ]
-                })
-            
-            # Combine all conditions with AND
-            if len(filter_conditions) > 1:
-                filter_dict = {"$and": filter_conditions}
-            else:
-                filter_dict = filter_conditions[0]
-            
-            # Search for relevant chunks
-            results = self.vectorstore.similarity_search(
-                query=query,
-                k=k,
-                filter=filter_dict
-            )
-            
-            return results
-            
-        except Exception as e:
-            print(f"Error retrieving chunks for {ticker}: {e}")
-            return []
-    
     def get_available_filings(self, ticker: str) -> List[Dict[str, Any]]:
-        """
-        Get list of available filings for a ticker.
-        
-        Args:
-            ticker: Stock ticker symbol
-            
-        Returns:
-            List of filing information dictionaries
-        """
+        """Return a list of stored filings for a ticker."""
         try:
-            # Query the collection to get all documents for this ticker
-            results = self.vectorstore.get(
-                where={"ticker": ticker.upper()}
-            )
-            
-            # Extract unique filings
-            filings = {}
-            for metadata in results.get("metadatas", []):
-                key = f"{metadata.get('ticker')}_{metadata.get('filing_type')}"
-                if key not in filings:
-                    filings[key] = {
-                        "ticker": metadata.get("ticker"),
-                        "filing_type": metadata.get("filing_type"),
-                        "source": metadata.get("source"),
-                        "ingestion_date": metadata.get("ingestion_date")
-                    }
-            
-            return list(filings.values())
-            
+            ensure_schema()
+            with connect() as conn, conn.cursor() as cur:
+                cur.execute(
+                    """SELECT ticker, filing_type, source, company,
+                              ingested_at, num_chunks
+                       FROM filings WHERE ticker = %s
+                       ORDER BY ingested_at DESC""",
+                    (ticker.upper(),),
+                )
+                rows = cur.fetchall()
+            return [
+                {
+                    "ticker": r[0],
+                    "filing_type": r[1],
+                    "source": r[2],
+                    "company": r[3],
+                    "ingestion_date": r[4].isoformat() if r[4] else None,
+                    "num_chunks": r[5],
+                }
+                for r in rows
+            ]
         except Exception as e:
             print(f"Error getting available filings for {ticker}: {e}")
             return []
 
-# Sample 10-K/10-Q document URLs (these would normally be downloaded from SEC EDGAR)
+
+# Sample 10-K content for demo/initialisation (used by initialize_sample_data).
 SAMPLE_DOCUMENTS = {
-    "AAPL": {
-        "10-K": "https://www.sec.gov/Archives/edgar/data/320193/000032019323000106/aapl-20230930.htm",
-        "ticker": "AAPL",
-        "company": "Apple Inc."
-    },
-    "MSFT": {
-        "10-K": "https://www.sec.gov/Archives/edgar/data/789019/000156459023003001/msft-10k_20230630.htm",
-        "ticker": "MSFT", 
-        "company": "Microsoft Corporation"
-    },
-    "GOOGL": {
-        "10-K": "https://www.sec.gov/Archives/edgar/data/1652044/000165204423000016/goog-20221231.htm",
-        "ticker": "GOOGL",
-        "company": "Alphabet Inc."
-    }
+    "AAPL": {"company": "Apple Inc."},
+    "MSFT": {"company": "Microsoft Corporation"},
+    "GOOGL": {"company": "Alphabet Inc."},
 }
+
+_SAMPLE_10K_CONTENT = """
+UNITED STATES SECURITIES AND EXCHANGE COMMISSION
+
+FORM 10-K — ANNUAL REPORT
+
+For the fiscal year ended September 30, 2023
+
+Apple Inc.
+
+BUSINESS
+The Company designs, manufactures and markets smartphones, personal computers,
+tablets, wearables and accessories, and sells a variety of related services.
+
+FINANCIAL PERFORMANCE
+Total net sales were $383.3 billion for 2023, compared to $394.3 billion for 2022.
+Gross margin percentage was 44.1% for 2023, compared to 43.3% for 2022.
+Operating income was $114.3 billion for 2023, compared to $119.4 billion for 2022.
+
+RISK FACTORS
+Global and regional economic conditions could materially adversely affect the
+Company. Adverse economic conditions can reduce demand for the Company's products
+and services.
+"""
 
 
 def initialize_sample_data(rag_system: FundamentalRAG) -> None:
-    """
-    Initialize the RAG system with sample 10-K documents.
-    Note: In a production system, these would be actual PDF files.
-    For now, we'll create sample text documents.
-    """
-    
-    sample_data_dir = Path("./data/sample_filings")
-    sample_data_dir.mkdir(parents=True, exist_ok=True)
-    
-    # Create sample 10-K content for demonstration
-    sample_10k_content = """
-    UNITED STATES
-    SECURITIES AND EXCHANGE COMMISSION
-    Washington, D.C. 20549
-    
-    FORM 10-K
-    
-    ANNUAL REPORT PURSUANT TO SECTION 13 OR 15(d) OF THE SECURITIES EXCHANGE ACT OF 1934
-    
-    For the fiscal year ended September 30, 2023
-    
-    Commission File Number: 001-36743
-    
-    Apple Inc.
-    (Exact name of registrant as specified in its charter)
-    
-    BUSINESS
-    
-    Company Background
-    
-    The Company designs, manufactures and markets smartphones, personal computers, tablets, wearables and accessories, and sells a variety of related services. The Company's fiscal year is the 52- or 53-week period that ends on the last Saturday of September.
-    
-    Products
-    
-    iPhone
-    iPhone® is the Company's line of smartphones based on its iOS operating system. In October 2022, the Company introduced iPhone 14, iPhone 14 Plus, iPhone 14 Pro and iPhone 14 Pro Max. iPhone includes Siri®, the Company's voice-activated digital assistant.
-    
-    Mac
-    Mac® is the Company's line of personal computers based on its macOS® operating system. The Mac product line includes laptops MacBook Air® and MacBook Pro®, as well as desktops iMac®, Mac mini®, Mac Studio® and Mac Pro®.
-    
-    iPad
-    iPad® is the Company's line of multipurpose tablets based on its iPadOS® operating system. The iPad product line includes iPad, iPad mini®, iPad Air® and iPad Pro®.
-    
-    FINANCIAL PERFORMANCE
-    
-    Net Sales
-    Total net sales were $383.3 billion for 2023, compared to $394.3 billion for 2022. The year-over-year decrease in total net sales was primarily due to lower sales of iPhone and Mac, partially offset by higher sales of Services.
-    
-    Gross Margin
-    Gross margin percentage was 44.1% for 2023, compared to 43.3% for 2022. The year-over-year increase in gross margin percentage was primarily due to a different mix of products and services sold.
-    
-    Operating Income
-    Operating income was $114.3 billion for 2023, compared to $119.4 billion for 2022. The year-over-year decrease in operating income was primarily due to lower gross profit, partially offset by lower operating expenses.
-    
-    RISK FACTORS
-    
-    The Company's business, reputation, results of operations, financial condition and stock price can be affected by a number of factors, whether currently known or unknown, including those described below. When any one or more of these risks materialize from time to time, the Company's business, reputation, results of operations, financial condition and stock price can be materially and adversely affected.
-    
-    Global and regional economic conditions could materially adversely affect the Company.
-    
-    The Company's operations and performance depend significantly on global and regional economic conditions and adverse economic conditions can reduce demand for the Company's products and services.
-    """
-    
-    # Save sample content as text files (in production, these would be PDFs)
-    for ticker, doc_info in SAMPLE_DOCUMENTS.items():
-        file_path = sample_data_dir / f"{ticker}_10K_sample.txt"
-        
-        # Customize content for each company
-        customized_content = sample_10k_content.replace("Apple Inc.", doc_info["company"])
-        customized_content = customized_content.replace("AAPL", ticker)
-        
-        with open(file_path, "w") as f:
-            f.write(customized_content)
-        
-        # Convert text to Document object and ingest
-        doc = Document(
-            page_content=customized_content,
-            metadata={
-                "ticker": ticker,
-                "filing_type": "10-K",
-                "source": str(file_path),
-                "company": doc_info["company"],
-                "ingestion_date": datetime.now().isoformat()
-            }
+    """Seed the RAG store with small sample 10-K text (for demos without filings)."""
+    for ticker, info in SAMPLE_DOCUMENTS.items():
+        content = _SAMPLE_10K_CONTENT.replace("Apple Inc.", info["company"])
+        rag_system.ingest_text(
+            content,
+            ticker=ticker,
+            filing_type="10-K",
+            filing_year=2023,
+            filing_start_month=1,
+            filing_end_month=12,
+            period_start=date(2023, 1, 1),
+            period_end=date(2023, 12, 31),
+            source=f"sample::{ticker}",
+            company=info["company"],
         )
-        
-        # Split and add to vector store
-        chunks = rag_system.text_splitter.split_documents([doc])
-        for chunk in chunks:
-            chunk.metadata.update(doc.metadata)
-        
-        rag_system.vectorstore.add_documents(chunks)
-        print(f"Initialized sample data for {ticker} ({doc_info['company']})")
+        print(f"Initialized sample data for {ticker} ({info['company']})")
 
 
 def validate_file_path(file_path: str) -> bool:
@@ -350,11 +402,9 @@ def validate_file_path(file_path: str) -> bool:
     if not os.path.exists(file_path):
         print(f"❌ Error: File not found: {file_path}")
         return False
-
     if not file_path.lower().endswith('.pdf'):
         print(f"⚠️  Warning: File is not a PDF: {file_path}")
         print("   The system is designed for PDF documents but will attempt to process.")
-
     return True
 
 
@@ -370,7 +420,7 @@ def validate_ticker(ticker: str) -> bool:
 def validate_filing_type(filing_type: str) -> bool:
     """Validate filing type."""
     valid_types = ["10K", "10Q", "8K", "20F"]
-    if filing_type not in valid_types:
+    if _normalize_filing_type(filing_type) not in valid_types:
         print(f"❌ Error: Invalid filing type: {filing_type}")
         print(f"   Valid types are: {', '.join(valid_types)}")
         return False
@@ -384,35 +434,30 @@ def ingest_single_document(
     filing_year: int,
     filing_start_month: int,
     filing_end_month: int,
-    document_path: str
+    document_path: str,
 ) -> bool:
-    """Ingest a single document."""
+    """Ingest a single PDF document, with input validation."""
     print("\n📄 Ingesting document:")
     print(f"   Ticker: {ticker}")
     print(f"   Filing Type: {filing_type}")
     print(f"   Path: {document_path}")
 
-    # Validate inputs
     if not validate_ticker(ticker):
         return False
-
     if not validate_filing_type(filing_type):
         return False
-
     if not validate_file_path(document_path):
         return False
 
-    # Perform ingestion
     try:
-        success = rag_system.ingest_document(ticker.upper(), filing_type, filing_year, filing_start_month,
-                                             filing_end_month, document_path)
+        success = rag_system.ingest_document(
+            ticker.upper(), filing_type, filing_year,
+            filing_start_month, filing_end_month, document_path)
         if success:
             print(f"✅ Successfully ingested {ticker} {filing_type}")
-            return True
         else:
             print(f"❌ Failed to ingest {ticker} {filing_type}")
-            return False
-
+        return success
     except Exception as e:
         print(f"❌ Error during ingestion: {e}")
         return False
@@ -420,34 +465,25 @@ def ingest_single_document(
 
 def parse_filename_metadata(filename: str) -> dict[str, Any] | None:
     """
-    Parse metadata from filename using common naming conventions.
+    Parse metadata from a filing PDF filename.
 
-    Expected formats:
-    - AAPL_10K_2023.pdf
-    - MSFT-10Q-Q1-2023.pdf
-    - ticker_filing_year.pdf
+    Expected format: TICKER-FILINGTYPE-Q#-STARTMONTH-ENDMONTH-YEAR.pdf
+    e.g. AAPL-10Q-Q3-4-6-2025.pdf
     """
     basename = os.path.basename(filename).replace('.pdf', '').replace('.PDF', '')
-
-    # Try different parsing patterns
     parts = basename.replace('-', '_').split('_')
 
-    if len(parts) >= 2:
-        ticker = parts[0].upper()
-        filing_type = parts[1].upper()
-        filing_freq = parts[2].upper()
-        filing_start_month = parts[3]
-        filing_end_month = parts[4]
-        filing_year = parts[5]
-
-        return {
-            'ticker': ticker,
-            'filing_type': filing_type,
-            'filing_year': int(filing_year),
-            'filing_start_month': int(filing_start_month),
-            'filing_end_month': int(filing_end_month)
-        }
-
+    if len(parts) >= 6:
+        try:
+            return {
+                'ticker': parts[0].upper(),
+                'filing_type': parts[1].upper(),
+                'filing_year': int(parts[5]),
+                'filing_start_month': int(parts[3]),
+                'filing_end_month': int(parts[4]),
+            }
+        except (ValueError, IndexError):
+            return None
     return None
 
 
@@ -457,17 +493,9 @@ def batch_ingest_documents(rag_system: FundamentalRAG, directory: str) -> int:
         print(f"❌ Error: Directory not found: {directory}")
         return 0
 
-    # Find all PDF files
-    pdf_patterns = [
-        os.path.join(directory, "*.pdf"),
-        os.path.join(directory, "*.PDF")
-        # os.path.join(directory, "**", "*.pdf"),
-        # os.path.join(directory, "**", "*.PDF")
-    ]
-
-    pdf_files = []
-    for pattern in pdf_patterns:
-        pdf_files.extend(glob.glob(pattern, recursive=True))
+    pdf_files: List[str] = []
+    for pattern in ("*.pdf", "*.PDF"):
+        pdf_files.extend(glob.glob(os.path.join(directory, pattern)))
 
     if not pdf_files:
         print(f"❌ No PDF files found in directory: {directory}")
@@ -478,28 +506,23 @@ def batch_ingest_documents(rag_system: FundamentalRAG, directory: str) -> int:
         print(f"   - {os.path.basename(pdf_file)}")
 
     successful_ingestions = 0
-
     for pdf_file in pdf_files:
-        print("\n" + "="*60)
-
-        # Try to parse metadata from filename
+        print("\n" + "=" * 60)
         metadata = parse_filename_metadata(pdf_file)
-
         if metadata:
-            success = ingest_single_document(
+            if ingest_single_document(
                 rag_system,
                 metadata['ticker'],
                 metadata['filing_type'],
                 metadata['filing_year'],
                 metadata['filing_start_month'],
                 metadata['filing_end_month'],
-                pdf_file
-            )
-            if success:
+                pdf_file,
+            ):
                 successful_ingestions += 1
         else:
             print(f"⚠️  Could not parse metadata from filename: {os.path.basename(pdf_file)}")
-            print("   Please use format: TICKER_FILING-TYPE_YEAR.pdf (e.g., AAPL_10K_2023.pdf)")
+            print("   Expected: TICKER-FILINGTYPE-Q#-STARTMONTH-ENDMONTH-YEAR.pdf")
             print("   Skipping this file.")
 
     return successful_ingestions

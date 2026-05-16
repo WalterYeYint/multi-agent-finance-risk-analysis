@@ -67,7 +67,13 @@ The backend's `/api/analyze` endpoint runs the chain graph, then constructs a `D
 
 ### Fundamental RAG
 
-[src/utils/rag_utils.py](src/utils/rag_utils.py) `FundamentalRAG` ingests PDFs from [data/filings/](data/filings/) into a Chroma vector store at `./data/chroma_db/`. The fundamental agent calls the `query_10k_documents` tool ([src/utils/tools.py](src/utils/tools.py)) via a LangGraph `create_react_agent`. **Filings must be named `TICKER-FILINGTYPE-Q#-STARTMONTH-ENDMONTH-YEAR.pdf`** (e.g. `AAPL-10Q-Q3-4-6-2025.pdf`) — the agent uses `period_to_months_range()` to filter filings by date range. To rebuild the index, delete `./data/chroma_db/`.
+[src/utils/rag_utils.py](src/utils/rag_utils.py) `FundamentalRAG` stores filings in **Postgres + pgvector** (not Chroma anymore): filing metadata in the `filings` table, chunk text + embeddings in `filing_chunks`. Connection and schema live in [src/utils/db.py](src/utils/db.py); `ensure_schema()` creates the `vector` extension and tables idempotently. Configure via `DATABASE_URL` (a `postgresql://` URL — a `postgresql+psycopg://` prefix is also accepted). A local Postgres with pgvector is required: `docker run -e POSTGRES_USER=finance -e POSTGRES_PASSWORD=finance -e POSTGRES_DB=finance_rag -p 5432:5432 pgvector/pgvector:pg16`.
+
+The fundamental agent calls the `query_10k_documents` tool ([src/utils/tools.py](src/utils/tools.py)) via a LangGraph `create_react_agent`; that tool calls `retrieve_relevant_chunks()`, which does a cosine-distance (`<=>`) search filtered by ticker and filing date range. Chunks are namespaced by an `embedding_model` tag (provider + vector dimension), so OpenAI/Ollama/mock embeddings can coexist without a dimension clash — retrieval only ever compares same-dimension vectors. Ingestion is idempotent (a filing already present, by SEC accession number or natural key, is skipped). To rebuild, `DROP TABLE filings, filing_chunks` (the `ON DELETE CASCADE` clears chunks with the parent filing).
+
+Two ingestion paths:
+- **PDFs** — drop files in [data/filings/](data/filings/) named `TICKER-FILINGTYPE-Q#-STARTMONTH-ENDMONTH-YEAR.pdf` (e.g. `AAPL-10Q-Q3-4-6-2025.pdf`); `batch_ingest_documents()` parses the metadata from the filename. The fundamental agent auto-ingests this directory if a ticker has no stored filings.
+- **SEC EDGAR auto-ingest** — `python -m src.utils.edgar_ingest --tickers AAPL,MSFT --forms 10-K,10-Q --limit 4` downloads filings straight from the free EDGAR API, extracts text, and ingests via `ingest_text()`. Cron-safe (skips already-stored filings). Set `SEC_USER_AGENT` to a real contact string or SEC throttles requests.
 
 ### Agent response parsing
 
@@ -81,6 +87,8 @@ Agents construct a **new** `State` each step rather than mutating in place — t
 
 Required env vars (set in `.env`, loaded via `python-dotenv`):
 - `OPENAI_API_KEY` *or* run Ollama locally (one of the two)
+- `DATABASE_URL` — Postgres+pgvector connection for the RAG store (default `postgresql://finance:finance@localhost:5432/finance_rag`)
+- `SEC_USER_AGENT` — contact string for SEC EDGAR auto-ingest; `FILINGS_RAW_DIR` — where extracted filing text is archived (default `./data/filings_raw`)
 - `POLYGON_API_KEY` — for real news; falls back to synthetic briefs if missing
 - `LANGCHAIN_API_KEY`, `LANGCHAIN_TRACING_V2=true`, `LANGCHAIN_PROJECT` — for LangSmith tracing (optional)
 - `ANALYSIS_MODE` — `chain` (default) or `debate`; can also be passed per-request as `mode` in the `/api/analyze` body
