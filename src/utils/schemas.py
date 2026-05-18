@@ -1,7 +1,39 @@
-from typing import List, Literal, Dict, Any, Optional
+from typing import List, Literal, Dict, Any, Optional, Annotated
 from datetime import datetime
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, Field, BeforeValidator
 from collections import defaultdict
+
+
+def _coerce_str_list(value: Any) -> Any:
+    """
+    Flatten an LLM-produced list field into a list of plain strings.
+
+    Different models emit list items in different shapes: GPT-4o returns plain
+    strings, while smaller local models (e.g. llama3.1) often return per-item
+    dicts like {"summary": ..., "potential_market_impact": ...}. To keep schema
+    validation model-agnostic, a dict item is collapsed to its values joined by
+    "; ", and any other non-string item is stringified. A plain list of strings
+    passes through unchanged.
+    """
+    if value is None:
+        return []
+    if isinstance(value, str):
+        return [value]
+    if not isinstance(value, list):
+        return value  # let pydantic raise its normal type error
+    coerced: List[str] = []
+    for item in value:
+        if isinstance(item, str):
+            coerced.append(item)
+        elif isinstance(item, dict):
+            coerced.append("; ".join(str(v) for v in item.values()))
+        else:
+            coerced.append(str(item))
+    return coerced
+
+
+# A List[str] field that tolerates model-dependent output shape (see above).
+StrList = Annotated[List[str], BeforeValidator(_coerce_str_list)]
 
 
 class MarketData(BaseModel):
@@ -42,8 +74,23 @@ class SentimentSummary(BaseModel):
     confidence_score: float = 0
     summary: str = ""
     investment_recommendation: str = ""
-    key_insights: List[str] = []
+    key_insights: StrList = []
     methodology: str = ""
+
+
+class SentimentExtract(BaseModel):
+    """
+    Output schema for the sentiment agent's structured-output (structuring)
+    step. Every field is REQUIRED (no defaults) — a field with a default is
+    optional in the generated JSON schema, and smaller local models simply
+    skip optional fields, leaving them empty. The agent maps this into the
+    storage schema (SentimentSummary), adding the system-owned fields.
+    """
+    overall_sentiment: Literal["bullish", "bearish", "neutral"]
+    confidence_score: float
+    summary: str
+    investment_recommendation: str
+    key_insights: StrList
 
 
 class ValuationMetrics(BaseModel):
@@ -56,7 +103,7 @@ class ValuationMetrics(BaseModel):
     annualized_volatility: float
     price_trend: Literal["upward", "downward", "sideways"]
     volatility_regime: Literal["low", "medium", "high"]
-    valuation_insights: List[str] = Field(default_factory=list)
+    valuation_insights: StrList = Field(default_factory=list)
     trend_analysis: str
     risk_assessment: str
     methodology: str = "Computational analysis with 252 trading days assumption"
@@ -79,15 +126,33 @@ class FundamentalAnalysis(BaseModel):
     filing_date: str = ""
     analysis_date: str = ""
     executive_summary: str = ""
-    key_financial_metrics: Dict[str, Any] = {}
-    business_highlights: List[str] = []
-    risk_factors: List[str] = []
+    key_financial_metrics: StrList = []
+    business_highlights: StrList = []
+    risk_factors: StrList = []
     competitive_position: str = ""
     growth_prospects: str = ""
     financial_health_score: float = 0
     investment_thesis: str = ""
-    concerns_and_risks: List[str] = []
+    concerns_and_risks: StrList = []
     methodology: str = "RAG-enhanced 10-K/10-Q document analysis"
+
+
+class FundamentalExtract(BaseModel):
+    """
+    Output schema for the fundamental agent's structured-output step. Every
+    field is REQUIRED (see SentimentExtract for the rationale). The agent maps
+    this into the storage schema (FundamentalAnalysis), adding the system-owned
+    fields (ticker, filing_type, filing_date, analysis_date, methodology).
+    """
+    executive_summary: str
+    key_financial_metrics: StrList
+    business_highlights: StrList
+    risk_factors: StrList
+    competitive_position: str
+    growth_prospects: str
+    financial_health_score: float
+    investment_thesis: str
+    concerns_and_risks: StrList
 
 # Debate
 class DebateReport(BaseModel):

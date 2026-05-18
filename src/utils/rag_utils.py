@@ -107,29 +107,43 @@ class FundamentalRAG:
         try:
             with connect() as conn:
                 with conn.cursor() as cur:
-                    existing_id = self._find_filing_id(
+                    # Dedup is per (filing, embedding_model): one filing row can
+                    # hold chunks from several embedding providers side by side,
+                    # so switching MODEL_PROVIDER later needs no re-ingest.
+                    filing_id = self._find_filing_id(
                         cur, accession_no, ticker, filing_type,
                         filing_year, filing_start_month, filing_end_month)
-                    if existing_id is not None:
-                        if not force:
-                            print(f"⏭️  {ticker} {filing_type} {filing_year} "
-                                  f"({filing_start_month}-{filing_end_month}) "
-                                  f"already ingested — skipping.")
-                            return True
-                        cur.execute("DELETE FROM filings WHERE id = %s", (existing_id,))
-
-                    cur.execute(
-                        """INSERT INTO filings
-                           (ticker, filing_type, filing_year, filing_start_month,
-                            filing_end_month, period_start, period_end,
-                            accession_no, company, source)
-                           VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
-                           RETURNING id""",
-                        (ticker, filing_type, filing_year, filing_start_month,
-                         filing_end_month, period_start, period_end,
-                         accession_no, company, source),
-                    )
-                    filing_id = cur.fetchone()[0]
+                    if filing_id is not None:
+                        cur.execute(
+                            "SELECT count(*) FROM filing_chunks "
+                            "WHERE filing_id = %s AND embedding_model = %s",
+                            (filing_id, self.embedding_model))
+                        model_chunks = cur.fetchone()[0]
+                        if model_chunks > 0:
+                            if not force:
+                                print(f"⏭️  {ticker} {filing_type} {filing_year} "
+                                      f"already ingested for embedding model "
+                                      f"'{self.embedding_model}' — skipping.")
+                                return True
+                            # force: replace only this model's chunks, leaving
+                            # the filing row and other providers' chunks intact.
+                            cur.execute(
+                                "DELETE FROM filing_chunks "
+                                "WHERE filing_id = %s AND embedding_model = %s",
+                                (filing_id, self.embedding_model))
+                    else:
+                        cur.execute(
+                            """INSERT INTO filings
+                               (ticker, filing_type, filing_year, filing_start_month,
+                                filing_end_month, period_start, period_end,
+                                accession_no, company, source)
+                               VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
+                               RETURNING id""",
+                            (ticker, filing_type, filing_year, filing_start_month,
+                             filing_end_month, period_start, period_end,
+                             accession_no, company, source),
+                        )
+                        filing_id = cur.fetchone()[0]
 
                     texts = [c.page_content for c in chunks]
                     vectors = self.embeddings.embed_documents(texts)
@@ -158,12 +172,16 @@ class FundamentalRAG:
                            VALUES (%s, %s, %s, %s, %s, %s, %s)""",
                         rows,
                     )
-                    cur.execute("UPDATE filings SET num_chunks = %s WHERE id = %s",
-                                (len(rows), filing_id))
+                    # num_chunks is the total across all embedding models.
+                    cur.execute(
+                        "UPDATE filings SET num_chunks = "
+                        "(SELECT count(*) FROM filing_chunks WHERE filing_id = %s) "
+                        "WHERE id = %s",
+                        (filing_id, filing_id))
                 conn.commit()
 
             print(f"✅ Ingested {len(chunks)} chunks for {ticker} {filing_type} "
-                  f"{filing_year} (months {filing_start_month}-{filing_end_month})")
+                  f"{filing_year} under embedding model '{self.embedding_model}'")
             return True
 
         except Exception as e:
@@ -207,12 +225,22 @@ class FundamentalRAG:
         )
 
     def has_filing(self, accession_no: str) -> bool:
-        """Return True if a filing with this SEC accession number is already stored."""
+        """
+        Return True if this filing's chunks are already stored *for the active
+        embedding model*. Another provider's chunks for the same filing don't
+        count — so re-running ingest under a new provider adds its vectors
+        rather than skipping.
+        """
         if not accession_no:
             return False
         ensure_schema()
         with connect() as conn, conn.cursor() as cur:
-            cur.execute("SELECT 1 FROM filings WHERE accession_no = %s", (accession_no,))
+            cur.execute(
+                """SELECT 1 FROM filing_chunks c
+                   JOIN filings f ON f.id = c.filing_id
+                   WHERE f.accession_no = %s AND c.embedding_model = %s
+                   LIMIT 1""",
+                (accession_no, self.embedding_model))
             return cur.fetchone() is not None
 
     # --------------------------------------------------------------- retrieve
