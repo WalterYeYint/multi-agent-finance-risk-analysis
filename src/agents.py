@@ -57,30 +57,21 @@ def data_agent(state: State, config: RunnableConfig):
     except Exception as e:
         print(f"Exception occured:{e}")
     
-    # Create new state with updated data
-    new_state = State(
-        ticker=state.ticker,
-        period=state.period,
-        interval=state.interval,
-        horizon_days=state.horizon_days,
-        market=MarketData(
+    # Return only the keys this agent produces; LangGraph merges them into the
+    # graph state, leaving every other field intact.
+    return {
+        "market": MarketData(
             ticker=state.ticker,
             period=state.period,
             interval=state.interval,
-            price_csv=price_csv
+            price_csv=price_csv,
         ),
-        news=NewsBundle(
+        "news": NewsBundle(
             ticker=state.ticker,
             window_days=min(14, state.horizon_days),
-            items=items
+            items=items,
         ),
-        sentiment=state.sentiment,
-        valuation=state.valuation,
-        fundamental=state.fundamental,
-        metrics=state.metrics,
-        report=state.report
-    )
-    return new_state
+    }
 
 
 def sentiment_agent(state: State, config: RunnableConfig):
@@ -102,20 +93,7 @@ def sentiment_agent(state: State, config: RunnableConfig):
             key_insights=["No news items found for analysis"],
             methodology="LLM-based reflection-enhanced summarization"
         )
-        
-        new_state = State(
-            ticker=state.ticker,
-            period=state.period,
-            interval=state.interval,
-            horizon_days=state.horizon_days,
-            market=state.market,
-            news=state.news,
-            sentiment=sentiment_summary,
-            valuation=state.valuation,
-            metrics=state.metrics,
-            report=state.report
-        )
-        return new_state
+        return {"sentiment": sentiment_summary}
     
     # Prepare news data for analysis
     news_text = []
@@ -184,20 +162,7 @@ def sentiment_agent(state: State, config: RunnableConfig):
             methodology="LLM-based reflection-enhanced summarization",
         )
     
-    new_state = State(
-        ticker=state.ticker,
-        period=state.period,
-        interval=state.interval,
-        horizon_days=state.horizon_days,
-        market=state.market,
-        news=state.news,
-        sentiment=sentiment_summary,
-        valuation=state.valuation,
-        fundamental=state.fundamental,
-        metrics=state.metrics,
-        report=state.report
-    )
-    return new_state
+    return {"sentiment": sentiment_summary}
 
 
 def fundamental_agent(state: State, config: RunnableConfig):
@@ -295,20 +260,7 @@ def fundamental_agent(state: State, config: RunnableConfig):
             )
 
     
-    new_state = State(
-        ticker=state.ticker,
-        period=state.period,
-        interval=state.interval,
-        horizon_days=state.horizon_days,
-        market=state.market,
-        news=state.news,
-        sentiment=state.sentiment,
-        valuation=state.valuation,
-        fundamental=fundamental_analysis,
-        metrics=state.metrics,
-        report=state.report
-    )
-    return new_state
+    return {"fundamental": fundamental_analysis}
 
 
 def valuation_agent(state: State, config: RunnableConfig):
@@ -368,20 +320,7 @@ def valuation_agent(state: State, config: RunnableConfig):
             valuation_metrics.trend_analysis += (
                 "\n\nLLM commentary unavailable; using computed metrics only.")
     
-    # Create new state with valuation metrics
-    new_state = State(
-        ticker=state.ticker,
-        period=state.period,
-        interval=state.interval,
-        horizon_days=state.horizon_days,
-        market=state.market,
-        news=state.news,
-        sentiment=state.sentiment,
-        valuation=valuation_metrics,
-        metrics=state.metrics,
-        report=state.report
-    )
-    return new_state
+    return {"valuation": valuation_metrics}
 
 
 def risk_agent(state: State, config: RunnableConfig):
@@ -405,20 +344,8 @@ def risk_agent(state: State, config: RunnableConfig):
         risk_flags=sorted(set(flags)),
     )
     
-    # Create new state with updated metrics
-    new_state = State(
-        ticker=state.ticker,
-        period=state.period,
-        interval=state.interval,
-        horizon_days=state.horizon_days,
-        market=state.market,
-        news=state.news,
-        sentiment=state.sentiment,
-        valuation=state.valuation,
-        metrics=metrics,
-        report=state.report
-    )
-    return new_state
+    return {"metrics": metrics}
+
 
 def writer_agent(state: State, config: RunnableConfig):
     # llm = get_llm()
@@ -678,21 +605,7 @@ No fundamental analysis available - no 10-K/10-Q data found.
         markdown_report=md,
     )
     
-    # Create new state with updated report
-    new_state = State(
-        ticker=state.ticker,
-        period=state.period,
-        interval=state.interval,
-        horizon_days=state.horizon_days,
-        market=state.market,
-        news=state.news,
-        sentiment=state.sentiment,
-        valuation=state.valuation,
-        fundamental=state.fundamental,
-        metrics=state.metrics,
-        report=report
-    )
-    return new_state
+    return {"report": report}
 
 # Debate
 def debate_manager(state: State):

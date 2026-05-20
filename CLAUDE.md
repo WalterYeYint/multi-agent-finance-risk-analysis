@@ -40,6 +40,14 @@ bash test_program.sh
 
 The integration test compares the debate's BUY/SELL/HOLD recommendation against the actual average close-price delta over `horizon_days` after `end_date` — it only passes if the recommendation aligned with what subsequently happened in the market.
 
+### Eval suite
+
+```bash
+python -m src.evals.eval_suite --ticker AAPL --runs 3
+```
+
+[src/evals/eval_suite.py](src/evals/eval_suite.py) is a standalone measurement script (not pytest — these are slow, non-deterministic quality metrics). It runs the full pipeline N times and reports: (a) structured-output success rate, (b) number grounding (fundamental-analysis numbers vs. retrieved filing chunks — an approximate hallucination signal), (c) BUY/HOLD/SELL recommendation stability across runs. Needs Postgres + an LLM provider; minutes per run.
+
 ### Setup
 ```bash
 bash setup.sh               # installs frontend (npm), backend, and root Python deps
@@ -54,7 +62,7 @@ streamlit run chatgpt_ui.py
 
 ### Two LangGraph workflows in [src/main.py](src/main.py)
 
-1. **`build_chain_graph()`** — linear: `data → sentiment → valuation → fundamental → risk → writer → END`. Each node is a function in [src/agents.py](src/agents.py) that takes and returns a `State` (pydantic model with optional `MarketData`, `NewsBundle`, `SentimentSummary`, `ValuationMetrics`, `FundamentalAnalysis`, `RiskMetrics`, `RiskReport`, `DebateReport` fields).
+1. **`build_chain_graph()`** — `data → (sentiment ‖ valuation ‖ fundamental) → risk → writer → END`. `data` fans out to the three independent analyst agents, which run in parallel; `risk` has three incoming edges so LangGraph runs it once, after all three finish. Each node is a function in [src/agents.py](src/agents.py) taking a `State` (pydantic model with optional `MarketData`, `NewsBundle`, `SentimentSummary`, `ValuationMetrics`, `FundamentalAnalysis`, `RiskMetrics`, `RiskReport`, `DebateReport` fields).
 2. **`build_final_recommendation_graph()`** — debate loop: `debate_manager` is the entry and the hub; `route_debate` conditionally dispatches to whichever specialist (`debate_fundamental`, `debate_sentiment`, `debate_valuation`) has the lowest turn count, until either consensus is reached (`terminated == "END"`) or `agent_max_turn` (default 5) is hit (`terminated == "ENDMAX"`), then routes to `writer`.
 
 The backend's `/api/analyze` endpoint runs the chain graph, then constructs a `DebateReport`, attaches it to the resulting `State`, and runs the debate graph on top of it (with `recursion_limit=100`). The full run executes inside a watchdog thread with `ANALYZE_TIMEOUT_SECS` (default 900s).
@@ -81,9 +89,9 @@ The `sentiment` and `fundamental` agents are LangGraph `create_react_agent`s bui
 
 The structuring step uses dedicated **`SentimentExtract` / `FundamentalExtract`** schemas ([src/utils/schemas.py](src/utils/schemas.py)) whose fields are **all required (no defaults)**. This is load-bearing: a field with a default is *optional* in the generated JSON schema, and smaller models silently skip optional fields — so the storage schemas (`SentimentSummary` / `FundamentalAnalysis`, whose fields all have defaults) cannot be used directly as the response format. The agent functions in [src/agents.py](src/agents.py) read `result.get("structured_response")`, fall back to an empty storage schema if it is absent (agent/structuring error), otherwise map the `*Extract` object into the storage schema while filling the system-owned fields (`ticker`, `methodology`, `filing_*`, `analysis_date`, `news_items_analyzed`) themselves. Schema list fields use the `StrList` type ([schemas.py](src/utils/schemas.py) `_coerce_str_list`), which flattens dict-shaped list items as defense-in-depth. When adding a field the model should produce, add it to both the `*Extract` schema and its storage counterpart, and extend the mapping in [src/agents.py](src/agents.py).
 
-### State mutation pattern
+### State update pattern
 
-Agents construct a **new** `State` each step rather than mutating in place — they explicitly carry forward all unchanged fields. When adding a field to `State`, every agent function that returns a new `State` in [src/agents.py](src/agents.py) must be updated to propagate it, or the field will be silently dropped mid-pipeline.
+Each chain agent returns a **partial dict** of only the field(s) it produces (e.g. `sentiment_agent` returns `{"sentiment": ...}`) — LangGraph merges that into the graph state, leaving every other field intact. This is what makes the parallel fan-out safe: the three parallel agents write disjoint keys, so there is no channel-write conflict. Do **not** return a full `State(...)` from a chain agent — two parallel nodes writing the same key (`ticker`, etc.) would raise `InvalidUpdateError`, and a partial `State(...)` construction silently drops the unset fields. `graph.invoke()` returns a plain dict; callers wrap it with `State(**result)`.
 
 ## Environment
 

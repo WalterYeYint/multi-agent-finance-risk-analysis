@@ -41,9 +41,13 @@ def build_chain_graph():
     g.add_node("writer", writer_agent)
 
     g.set_entry_point("data")
+    # data fans out to the three independent analysts, which run in parallel;
+    # risk has three incoming edges so it runs once, after all three finish.
     g.add_edge("data", "sentiment")
-    g.add_edge("sentiment", "valuation")
-    g.add_edge("valuation", "fundamental")
+    g.add_edge("data", "valuation")
+    g.add_edge("data", "fundamental")
+    g.add_edge("sentiment", "risk")
+    g.add_edge("valuation", "risk")
     g.add_edge("fundamental", "risk")
     g.add_edge("risk", "writer")
     g.add_edge("writer", END)
