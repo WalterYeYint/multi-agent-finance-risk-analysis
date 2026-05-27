@@ -84,6 +84,45 @@ CREATE TABLE IF NOT EXISTS filing_chunks (
 
 CREATE INDEX IF NOT EXISTS filing_chunks_filing_idx ON filing_chunks (filing_id);
 CREATE INDEX IF NOT EXISTS filing_chunks_ticker_idx ON filing_chunks (ticker);
+
+-- Append-only history of pipeline runs per (ticker, horizon). The "latest"
+-- snapshot is just the newest row for the pair; the same table also drives
+-- the run / risk history timeseries.
+CREATE TABLE IF NOT EXISTS snapshots (
+    id              BIGSERIAL PRIMARY KEY,
+    ticker          TEXT NOT NULL,
+    horizon         TEXT NOT NULL,    -- 'SHORT' | 'MID' | 'LONG'
+    generated_at    TIMESTAMPTZ NOT NULL DEFAULT now(),
+    sentiment       JSONB,
+    fundamental     JSONB,
+    valuation       JSONB,
+    metrics         JSONB,
+    debate          JSONB,
+    report_markdown TEXT,
+    cost_usd        NUMERIC(10, 4),
+    latency_ms      INTEGER
+);
+
+CREATE INDEX IF NOT EXISTS snapshots_lookup_idx
+    ON snapshots (ticker, horizon, generated_at DESC);
+
+-- On-demand pipeline requests + worker coordination. The polling status
+-- endpoint (23.5) reads from here; the worker (22.5) consumes queued rows.
+CREATE TABLE IF NOT EXISTS jobs (
+    id            BIGSERIAL PRIMARY KEY,
+    ticker        TEXT NOT NULL,
+    horizon       TEXT NOT NULL,
+    status        TEXT NOT NULL DEFAULT 'queued',  -- queued | running | ready | failed
+    progress      TEXT,
+    snapshot_id   BIGINT REFERENCES snapshots(id) ON DELETE SET NULL,
+    error         TEXT,
+    requested_at  TIMESTAMPTZ NOT NULL DEFAULT now(),
+    started_at    TIMESTAMPTZ,
+    finished_at   TIMESTAMPTZ
+);
+
+CREATE INDEX IF NOT EXISTS jobs_status_idx         ON jobs (status, requested_at);
+CREATE INDEX IF NOT EXISTS jobs_ticker_horizon_idx ON jobs (ticker, horizon);
 """
 
 _schema_ready = False

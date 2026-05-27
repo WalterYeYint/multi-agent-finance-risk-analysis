@@ -67,6 +67,14 @@ streamlit run chatgpt_ui.py
 
 The backend's `/api/analyze` endpoint runs the chain graph, then constructs a `DebateReport`, attaches it to the resulting `State`, and runs the debate graph on top of it (with `recursion_limit=100`). The full run executes inside a watchdog thread with `ANALYZE_TIMEOUT_SECS` (default 900s).
 
+### Horizon presets + snapshots
+
+The product surface no longer accepts a user-supplied `period` / `horizon_days`. Every pipeline run is parameterised by one of three baked-in **horizon presets** defined in [src/utils/horizons.py](src/utils/horizons.py): `SHORT` (1mo lookback / 7d forecast / 24h freshness), `MID` (6mo / 30d / 72h), `LONG` (2y / 90d / 168h). The `HORIZONS` dict is the single source of truth — agents still read `state.period` / `state.horizon_days` as before; only the *caller* (worker / API) maps a horizon name into those fields.
+
+`src/main.py:run_pipeline_for_horizon(ticker, horizon_name)` is the programmatic entry point for the worker and the on-demand API — it reuses the chain + debate graphs, times the run, persists a row to the `snapshots` table, and produces no file IO (unlike `run_all_graphs`, which is kept as the file-writing script for test-data generation).
+
+Two DB tables live alongside `filings`/`filing_chunks` in [src/utils/db.py](src/utils/db.py) `SCHEMA_DDL`: `snapshots` (append-only — `(ticker, horizon, generated_at)`; "latest" is just `ORDER BY generated_at DESC LIMIT 1`, the same table drives the run/risk history timeseries) and `jobs` (queued on-demand requests + worker coordination; status `queued | running | ready | failed`). [src/utils/snapshots.py](src/utils/snapshots.py) holds the CRUD helpers (`save_snapshot`, `get_latest_snapshot`, `is_fresh`, `list_snapshot_history`, `create_job`, `get_job`, `update_job_status`) — that file is storage-only and never invokes the pipeline.
+
 ### LLM provider abstraction
 
 [src/utils/config.py](src/utils/config.py) `get_llm()` auto-selects a provider in priority order: OpenAI (`OPENAI_API_KEY` → `gpt-4o`) → Anthropic → Google → Ollama (default `llama3.2:3b`, or `OLLAMA_MODEL`) → `MockLLM` fallback. Override with `MODEL_PROVIDER` env var. The backend's `_detect_model_provider()` mirrors this logic at the HTTP layer (and resolves `MODEL_PROVIDER=auto` to either openai or ollama based on key presence).

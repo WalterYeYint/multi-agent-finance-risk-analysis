@@ -9,7 +9,6 @@ import requests
 import io
 import base64
 import openai
-import json
 
 # Ensure we can import project code from src/
 PROJECT_ROOT = os.path.abspath(os.path.join(os.path.dirname(__file__), '..'))
@@ -17,10 +16,11 @@ SRC_DIR = os.path.join(PROJECT_ROOT, 'src')
 if SRC_DIR not in sys.path:
     sys.path.insert(0, SRC_DIR)
 
-from src import main  # src/main.py
-from agents import State  # src/agents.py
-from langchain_core.runnables import RunnableConfig
-from utils.schemas import DebateReport
+from src import main  # src/main.py — run_pipeline_for_horizon
+from utils.horizons import get_horizon, HORIZONS
+from utils.snapshots import (
+    get_latest_snapshot, is_fresh, list_snapshot_history, list_tracked_tickers,
+)
 
 from markdown_pdf import MarkdownPdf, Section
 
@@ -95,225 +95,127 @@ def get_available_models():
         'description': description
     })
 
+def _attach_pdf(resp: dict) -> dict:
+    """Render the snapshot's markdown report to a base64 PDF (best-effort)."""
+    md = (resp.get('report') or {}).get('markdown_report')
+    if md:
+        try:
+            pdf = MarkdownPdf(toc_level=2, optimize=True)
+            pdf.add_section(Section(md))
+            out = io.BytesIO()
+            pdf.save_bytes(out)
+            out.seek(0)
+            resp['report_pdf_base64'] = base64.b64encode(out.read()).decode('utf-8')
+        except Exception as e:
+            print(f"⚠️  PDF render failed: {e}")
+    return resp
+
+
+def _serialize_snapshot(snap: dict, *, cached: bool) -> dict:
+    """Map a `snapshots` row into the API response. The agent fields are already
+    stored as JSONB (model dumps), so this is a thin reshape — no more hand-rolled
+    safe_get walking."""
+    debate = snap.get('debate') or {}
+    return {
+        'ticker': snap['ticker'],
+        'horizon': snap['horizon'],
+        'generated_at': snap['generated_at'].isoformat() if snap.get('generated_at') else None,
+        'cached': cached,
+        'sentiment': snap.get('sentiment'),
+        'fundamental': snap.get('fundamental'),
+        'valuation': snap.get('valuation'),
+        'metrics': snap.get('metrics'),
+        'debate': {'consensus_summary': debate.get('consensus_summary')} if debate else None,
+        'agent_arguments': debate.get('agent_arguments'),
+        'report': {
+            'markdown_report': snap.get('report_markdown'),
+            'consensus_summary': debate.get('consensus_summary'),
+        },
+        'cost_usd': float(snap['cost_usd']) if snap.get('cost_usd') is not None else None,
+        'latency_ms': snap.get('latency_ms'),
+    }
+
+
+def _provider_unavailable_response():
+    """Return an error response if the configured LLM provider isn't reachable,
+    else None. Only checked on the compute path (cache hits skip it)."""
+    provider, openai_key = _detect_model_provider()
+    if provider == 'openai' and not openai_key:
+        return jsonify({'error': "OpenAI not configured. Set OPENAI_API_KEY or MODEL_PROVIDER=ollama."}), 503
+    if provider == 'ollama' and not _is_ollama_available():
+        return jsonify({'error': 'Ollama is not reachable. Start it with: ollama serve'}), 503
+    if provider not in ('openai', 'ollama'):
+        return jsonify({'error': f"Unknown MODEL_PROVIDER: {provider}."}), 400
+    return None
+
+
+def _run_pipeline_with_timeout(ticker: str, horizon_name: str):
+    """Run the full chain + debate pipeline for (ticker, horizon) under the
+    watchdog timeout; it persists a snapshot as a side effect.
+    Returns (ok: bool, error: Exception | None)."""
+    result_queue: "queue.Queue" = queue.Queue(maxsize=1)
+
+    def _run():
+        try:
+            main.run_pipeline_for_horizon(ticker, horizon_name)  # persists snapshot
+            result_queue.put((True, None))
+        except Exception as e:  # noqa: BLE001
+            result_queue.put((False, e))
+
+    thread = threading.Thread(target=_run, daemon=True)
+    thread.start()
+    timeout_seconds = int(os.getenv('ANALYZE_TIMEOUT_SECS', '900'))
+    thread.join(timeout_seconds)
+    if thread.is_alive():
+        return False, TimeoutError(f"Analysis timed out after {timeout_seconds}s")
+    return result_queue.get()
+
+
+def _resolve_snapshot(ticker: str, horizon):
+    """Cache-or-compute: return a fresh cached snapshot, otherwise run the
+    pipeline synchronously, persist, and return the new snapshot."""
+    cached = get_latest_snapshot(ticker, horizon.name)
+    if cached and is_fresh(cached, horizon):
+        return jsonify(_attach_pdf(_serialize_snapshot(cached, cached=True)))
+
+    unavailable = _provider_unavailable_response()
+    if unavailable is not None:
+        return unavailable
+
+    print(f"🧠 Computing snapshot for {ticker} / {horizon.name} (cache miss/stale)")
+    ok, err = _run_pipeline_with_timeout(ticker, horizon.name)
+    if not ok:
+        if isinstance(err, TimeoutError):
+            return jsonify({'error': str(err)}), 504
+        raise err
+
+    fresh = get_latest_snapshot(ticker, horizon.name)
+    if fresh is None:
+        return jsonify({'error': 'Pipeline finished but no snapshot was stored.'}), 500
+    return jsonify(_attach_pdf(_serialize_snapshot(fresh, cached=False)))
+
+
+def _parse_horizon(name: str):
+    """Return (Horizon, None) or (None, error_response)."""
+    try:
+        return get_horizon(name), None
+    except ValueError as e:
+        return None, (jsonify({'error': str(e)}), 400)
+
+
 @app.route('/api/analyze', methods=['POST'])
 def analyze_stock():
+    """Cache-or-compute a snapshot for {ticker, horizon}. `horizon` defaults to
+    MID; the legacy period/interval/horizon_days fields are ignored."""
     try:
         data = request.get_json() or {}
-
-        # Validate required fields
-        required = ['ticker', 'period', 'interval', 'horizon_days']
-        missing = [k for k in required if k not in data]
-        if missing:
-            return jsonify({'error': f"Missing required field(s): {', '.join(missing)}"}), 400
-
-        requested_mode = str(data.get('mode', '')).strip().lower() or None
-        env_mode = os.getenv('ANALYSIS_MODE')
-        effective_mode = requested_mode or env_mode
-
-        graph, state_cls = main.get_workflow(effective_mode)
-        print(f"🧠 Analysis mode: {main.resolve_mode(effective_mode)}")
-
-        state = state_cls(
-            ticker=str(data['ticker']).upper(),
-            period=str(data['period']),
-            interval=str(data['interval']),
-            horizon_days=int(data['horizon_days']),
-        )
-
-        # Detect provider dynamically (OpenAI vs Ollama)
-        model_provider, openai_key = _detect_model_provider()
-
-        if model_provider == 'openai':
-            if not openai_key:
-                return jsonify({
-                    'error': (
-                        "OpenAI GPT-4o not configured. Set OPENAI_API_KEY or set MODEL_PROVIDER=ollama."
-                    )
-                }), 503
-            print("🔍 Using OpenAI provider (GPT-4o). Skipping Ollama check.")
-        elif model_provider == 'ollama':
-            if not _is_ollama_available():
-                return jsonify({'error': 'Ollama is not reachable. Start it with: ollama serve'}), 503
-        else:
-            return jsonify({
-                'error': f"Unknown MODEL_PROVIDER: {model_provider}. Must be 'openai' or 'ollama'."
-            }), 400
-
-        # Log which provider is being used (for debugging)
-        print(f"🔍 Using provider: {model_provider}")
-
-        # Run with watchdog timeout to avoid UI hang
-        result_queue: "queue.Queue" = queue.Queue(maxsize=1)
-
-        def _run():
-            try:
-                res = graph.invoke(state)
-                res = State(**res)
-
-                # # Debate model for final recommendation
-                finalRecommendationGraph = main.build_final_recommendation_graph()
-                debateReport = DebateReport(agent_list=["fundamental", "sentiment", "valuation"])
-                debateReport.agent_max_turn = 5
-                res.debate = debateReport
-                res = finalRecommendationGraph.invoke(res, config=RunnableConfig(recursion_limit=100), verbose=True)
-                res = State(**res)
-
-                # Use the output directly, to test print report only
-                # with open("final_state_with_debate.json", "r") as f:
-                #     res = State.model_validate_json(f.read())
-                #     print(res)
-                
-                pdf = MarkdownPdf(toc_level=2, optimize=True)
-                pdf.add_section(Section(res.report.markdown_report))
-                out = io.BytesIO()
-                pdf.save_bytes(out)
-                out.seek(0)
-
-                # Put result in queue
-                result_queue.put((True, res, out))
-            except Exception as e:
-                result_queue.put((False, e, None))
-
-        thread = threading.Thread(target=_run, daemon=True)
-        thread.start()
-
-        timeout_seconds = int(os.getenv('ANALYZE_TIMEOUT_SECS', '900'))
-        thread.join(timeout_seconds)
-
-        if thread.is_alive():
-            return jsonify({'error': f'Analysis timed out after {timeout_seconds}s. Try a shorter period/interval.'}), 504
-
-        ok, payload, out_pdf = result_queue.get()
-        if not ok:
-            raise payload
-
-        final_state = payload
-
-        # with open('final_state_with_debate.json', 'r') as final_state_json:
-        #     final_state = json.load(final_state_json)
-        # pdf = MarkdownPdf(toc_level=2, optimize=True)
-        # pdf.add_section(Section(final_state["report"]["markdown_report"]))
-        # out_pdf = io.BytesIO()
-        # pdf.save_bytes(out_pdf)
-        # out_pdf.seek(0)
-
-        # ✅ Fix: normalize final_state to dict if needed
-        if not isinstance(final_state, dict):
-            final_state = final_state.__dict__ if hasattr(final_state, "__dict__") else {}
-
-        # ✅ Safe getter to handle both dicts and objects
-        def safe_get(obj, key, default=None):
-            if isinstance(obj, dict):
-                return obj.get(key, default)
-            return getattr(obj, key, default)
-
-        # ✅ Serialize response safely (kept identical)
-        result = {
-            'ticker': safe_get(final_state, 'ticker'),
-            'period': safe_get(final_state, 'period'),
-            'interval': safe_get(final_state, 'interval'),
-            'horizon_days': safe_get(final_state, 'horizon_days'),
-            'market': (
-                {
-                    'ticker': safe_get(safe_get(final_state, 'market'), 'ticker'),
-                    'period': safe_get(safe_get(final_state, 'market'), 'period'),
-                    'interval': safe_get(safe_get(final_state, 'market'), 'interval'),
-                    'price_csv': safe_get(safe_get(final_state, 'market'), 'price_csv'),
-                }
-                if safe_get(final_state, 'market') else None
-            ),
-            'news': (
-                {
-                    'ticker': safe_get(safe_get(final_state, 'news'), 'ticker'),
-                    'window_days': safe_get(safe_get(final_state, 'news'), 'window_days'),
-                    'items': [
-                        {
-                            'title': getattr(it, 'title', safe_get(it, 'title')),
-                            'url': getattr(it, 'url', safe_get(it, 'url')),
-                            'published': getattr(it, 'published', safe_get(it, 'published')),
-                        }
-                        for it in (safe_get(safe_get(final_state, 'news'), 'items') or [])
-                    ],
-                }
-                if safe_get(final_state, 'news') else None
-            ),
-            'sentiment': (
-                {
-                    'ticker': safe_get(safe_get(final_state, 'sentiment'), 'ticker'),
-                    'news_items_analyzed': safe_get(safe_get(final_state, 'sentiment'), 'news_items_analyzed'),
-                    'overall_sentiment': safe_get(safe_get(final_state, 'sentiment'), 'overall_sentiment'),
-                    'confidence_score': safe_get(safe_get(final_state, 'sentiment'), 'confidence_score'),
-                    'summary': safe_get(safe_get(final_state, 'sentiment'), 'summary'),
-                    'investment_recommendation': safe_get(safe_get(final_state, 'sentiment'), 'investment_recommendation'),
-                    'key_insights': safe_get(safe_get(final_state, 'sentiment'), 'key_insights'),
-                    'methodology': safe_get(safe_get(final_state, 'sentiment'), 'methodology'),
-                }
-                if safe_get(final_state, 'sentiment') else None
-            ),
-            'valuation': (
-                {
-                    'ticker': safe_get(safe_get(final_state, 'valuation'), 'ticker'),
-                    'analysis_period': safe_get(safe_get(final_state, 'valuation'), 'analysis_period'),
-                    'trading_days': safe_get(safe_get(final_state, 'valuation'), 'trading_days'),
-                    'cumulative_return': safe_get(safe_get(final_state, 'valuation'), 'cumulative_return'),
-                    'annualized_return': safe_get(safe_get(final_state, 'valuation'), 'annualized_return'),
-                    'daily_volatility': safe_get(safe_get(final_state, 'valuation'), 'daily_volatility'),
-                    'annualized_volatility': safe_get(safe_get(final_state, 'valuation'), 'annualized_volatility'),
-                    'price_trend': safe_get(safe_get(final_state, 'valuation'), 'price_trend'),
-                    'volatility_regime': safe_get(safe_get(final_state, 'valuation'), 'volatility_regime'),
-                    'valuation_insights': safe_get(safe_get(final_state, 'valuation'), 'valuation_insights'),
-                    'trend_analysis': safe_get(safe_get(final_state, 'valuation'), 'trend_analysis'),
-                    'risk_assessment': safe_get(safe_get(final_state, 'valuation'), 'risk_assessment'),
-                    'methodology': safe_get(safe_get(final_state, 'valuation'), 'methodology'),
-                }
-                if safe_get(final_state, 'valuation') else None
-            ),
-            'metrics': (
-                {
-                    'ticker': safe_get(safe_get(final_state, 'metrics'), 'ticker'),
-                    'horizon_days': safe_get(safe_get(final_state, 'metrics'), 'horizon_days'),
-                    'annual_vol': safe_get(safe_get(final_state, 'metrics'), 'annual_vol'),
-                    'max_drawdown': safe_get(safe_get(final_state, 'metrics'), 'max_drawdown'),
-                    'daily_var_95': safe_get(safe_get(final_state, 'metrics'), 'daily_var_95'),
-                    'sharpe_like': safe_get(safe_get(final_state, 'metrics'), 'sharpe_like'),
-                    'notes': safe_get(safe_get(final_state, 'metrics'), 'notes'),
-                    'risk_flags': safe_get(safe_get(final_state, 'metrics'), 'risk_flags'),
-                }
-                if safe_get(final_state, 'metrics') else None
-            ),
-            'report': (
-                {
-                    'ticker': safe_get(safe_get(final_state, 'report'), 'ticker'),
-                    'as_of': safe_get(safe_get(final_state, 'report'), 'as_of'),
-                    'summary': safe_get(safe_get(final_state, 'report'), 'summary'),
-                    'key_findings': safe_get(safe_get(final_state, 'report'), 'key_findings'),
-                    'metrics_table': safe_get(safe_get(final_state, 'report'), 'metrics_table'),
-                    'risk_flags': safe_get(safe_get(final_state, 'report'), 'risk_flags'),
-                    'methodology': safe_get(safe_get(final_state, 'report'), 'methodology'),
-                    'markdown_report': safe_get(safe_get(final_state, 'report'), 'markdown_report'),
-                    'consensus_summary': safe_get(safe_get(safe_get(final_state, 'report'), 'debate'),'consensus_summary'),
-                }
-                if safe_get(final_state, 'report') else None
-            ),
-            'debate': (
-                {
-                    'consensus_summary': safe_get(safe_get(final_state, 'debate'),'consensus_summary'),
-                }
-                if safe_get(final_state, 'debate') else None
-            )
-        }
-
-        result['analysis_mode'] = main.resolve_mode(effective_mode)
-
-        transcript = safe_get(safe_get(final_state, 'debate'), 'agent_arguments')
-        if transcript:
-            result['agent_arguments'] = transcript
-
-        if out_pdf:
-            result['report_pdf_base64'] = base64.b64encode(out_pdf.read()).decode('utf-8')
-
-        return jsonify(result)
-
+        ticker = str(data.get('ticker', '')).strip().upper()
+        if not ticker:
+            return jsonify({'error': 'Missing required field: ticker'}), 400
+        horizon, err = _parse_horizon(str(data.get('horizon', 'MID')))
+        if err:
+            return err
+        return _resolve_snapshot(ticker, horizon)
     except openai.AuthenticationError:
         return jsonify({'error': 'OpenAI authentication failed. Set a valid OPENAI_API_KEY.'}), 502
     except openai.OpenAIError as e:
@@ -323,6 +225,58 @@ def analyze_stock():
         print(f"Error in analyze_stock: {str(e)}")
         print(traceback.format_exc())
         return jsonify({'error': f'Analysis failed: {str(e)}'}), 500
+
+
+@app.route('/api/snapshot/<ticker>/<horizon>', methods=['GET'])
+def get_snapshot(ticker, horizon):
+    """Read (or compute on miss) the snapshot for one ticker + horizon."""
+    try:
+        h, err = _parse_horizon(horizon)
+        if err:
+            return err
+        return _resolve_snapshot(ticker.strip().upper(), h)
+    except Exception as e:
+        print(traceback.format_exc())
+        return jsonify({'error': f'Snapshot failed: {str(e)}'}), 500
+
+
+@app.route('/api/snapshot/<ticker>/<horizon>/history', methods=['GET'])
+def snapshot_history(ticker, horizon):
+    """Timeseries of past snapshots for the run/risk-history view."""
+    h, err = _parse_horizon(horizon)
+    if err:
+        return err
+    try:
+        days = int(request.args.get('days', 90))
+    except ValueError:
+        days = 90
+    rows = list_snapshot_history(ticker.strip().upper(), h.name, days=days)
+    history = [
+        {
+            'generated_at': r['generated_at'].isoformat() if r.get('generated_at') else None,
+            'overall_sentiment': (r.get('sentiment') or {}).get('overall_sentiment'),
+            'consensus_summary': (r.get('debate') or {}).get('consensus_summary'),
+            'risk_flags': (r.get('metrics') or {}).get('risk_flags'),
+            'annual_vol': (r.get('metrics') or {}).get('annual_vol'),
+            'max_drawdown': (r.get('metrics') or {}).get('max_drawdown'),
+        }
+        for r in rows
+    ]
+    return jsonify({'ticker': ticker.strip().upper(), 'horizon': h.name, 'history': history})
+
+
+@app.route('/api/tickers', methods=['GET'])
+def list_tickers():
+    """Tickers that have at least one snapshot, for the landing page."""
+    tickers = [
+        {
+            'ticker': t['ticker'],
+            'last_updated': t['last_updated'].isoformat() if t.get('last_updated') else None,
+            'snapshot_count': t['snapshot_count'],
+        }
+        for t in list_tracked_tickers()
+    ]
+    return jsonify({'horizons': list(HORIZONS), 'tickers': tickers})
 
 
 if __name__ == '__main__':

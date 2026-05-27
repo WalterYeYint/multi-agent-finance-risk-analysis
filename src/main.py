@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import os
 import sys
+import time
 from typing import Optional, Tuple, Type
 
 from langgraph.graph import StateGraph, END
@@ -28,6 +29,8 @@ from agents import (
 # from .agents import State, data_agent, risk_agent, writer_agent
 from agents import debate_sentiment_agent, debate_valuation_agent, debate_fundamental_agent, debate_manager, route_debate
 from utils.schemas import DebateReport
+from utils.horizons import get_horizon
+from utils.snapshots import save_snapshot
 
 
 def build_chain_graph():
@@ -80,6 +83,51 @@ def build_final_recommendation_graph():
     g.add_edge("writer", END)
     
     return g.compile()
+
+
+def run_pipeline_for_horizon(
+    ticker: str,
+    horizon_name: str,
+    end_date: Optional[str] = None,
+    *,
+    persist: bool = True,
+) -> Tuple[State, Optional[int]]:
+    """
+    Programmatic entry point for the worker / API. Runs the chain graph then
+    the debate graph for one (ticker, horizon) pair — *no file IO* — and (if
+    persist=True) writes a row to the `snapshots` table.
+
+    The horizon preset (Short / Mid / Long → period + horizon_days) comes from
+    utils.horizons; agents keep reading state.period / state.horizon_days as
+    today. Returns (final_state, snapshot_id_or_None).
+    """
+    h = get_horizon(horizon_name)
+    chain = build_chain_graph()
+    state = State(
+        ticker=ticker,
+        period=h.period,
+        interval="1d",
+        horizon_days=h.horizon_days,
+        end_date=end_date,
+    )
+
+    t0 = time.time()
+    final = State(**chain.invoke(state, config=RunnableConfig()))
+
+    debate_graph = build_final_recommendation_graph()
+    final.debate = DebateReport(
+        agent_list=["fundamental", "sentiment", "valuation"])
+    final.debate.agent_max_turn = 5
+    final = State(**debate_graph.invoke(
+        final, config=RunnableConfig(recursion_limit=100)))
+    latency_ms = int((time.time() - t0) * 1000)
+
+    snapshot_id: Optional[int] = None
+    if persist:
+        snapshot_id = save_snapshot(
+            ticker=ticker, horizon=h.name, state=final,
+            latency_ms=latency_ms, cost_usd=None)
+    return final, snapshot_id
 
 
 def resolve_mode(mode: Optional[str] = None) -> str:
