@@ -17,7 +17,11 @@ ollama serve
 source .venv/bin/activate
 python -m backend.app
 
-# Terminal 3 — React frontend on port 3000 (proxies /api → http://localhost:8000)
+# Terminal 3 — Worker: runs queued pipeline jobs + refreshes stale snapshots.
+# Required for cache-miss requests to ever resolve (the API only enqueues).
+python -m src.worker
+
+# Terminal 4 — React frontend on port 3000 (proxies /api → http://localhost:8000)
 cd frontend && npm start
 ```
 
@@ -73,7 +77,13 @@ The product surface no longer accepts a user-supplied `period` / `horizon_days`.
 
 `src/main.py:run_pipeline_for_horizon(ticker, horizon_name)` is the programmatic entry point for the worker and the on-demand API — it reuses the chain + debate graphs, times the run, persists a row to the `snapshots` table, and produces no file IO (unlike `run_all_graphs`, which is kept as the file-writing script for test-data generation).
 
-Two DB tables live alongside `filings`/`filing_chunks` in [src/utils/db.py](src/utils/db.py) `SCHEMA_DDL`: `snapshots` (append-only — `(ticker, horizon, generated_at)`; "latest" is just `ORDER BY generated_at DESC LIMIT 1`, the same table drives the run/risk history timeseries) and `jobs` (queued on-demand requests + worker coordination; status `queued | running | ready | failed`). [src/utils/snapshots.py](src/utils/snapshots.py) holds the CRUD helpers (`save_snapshot`, `get_latest_snapshot`, `is_fresh`, `list_snapshot_history`, `create_job`, `get_job`, `update_job_status`) — that file is storage-only and never invokes the pipeline.
+Two DB tables live alongside `filings`/`filing_chunks` in [src/utils/db.py](src/utils/db.py) `SCHEMA_DDL`: `snapshots` (append-only — `(ticker, horizon, generated_at)`; "latest" is just `ORDER BY generated_at DESC LIMIT 1`, the same table drives the run/risk history timeseries) and `jobs` (queued on-demand requests + worker coordination; status `queued | running | ready | failed`, with a partial unique index `jobs_pending_uniq` ensuring at most one in-flight job per ticker+horizon). [src/utils/snapshots.py](src/utils/snapshots.py) holds the CRUD + queue helpers (`save_snapshot`, `get_latest_snapshot`, `is_fresh`, `list_snapshot_history`, `list_tracked_tickers`, `create_job`/`get_or_create_pending_job`/`claim_next_job`/`enqueue_stale_refreshes`, `update_job_status`) — that file is storage-only and never invokes the pipeline.
+
+### Worker + async request flow
+
+Computing a snapshot (chain + debate) takes minutes, so it runs out of the request path. The Flask backend ([backend/app.py](backend/app.py)) only **reads or enqueues**: `GET /api/snapshot/<ticker>/<horizon>` (and the legacy `POST /api/analyze`) return `200` + snapshot on a fresh cache hit, otherwise `get_or_create_pending_job` and return `202 {status, job_id}`. The client polls the same URL (or `GET /api/jobs/<id>`) until it flips to `200`. No SSE.
+
+The worker ([src/worker.py](src/worker.py), `python -m src.worker`) is a separate serial loop: `claim_next_job()` (atomic `FOR UPDATE SKIP LOCKED`) → `run_pipeline_for_horizon(..., progress_cb=...)` (the callback writes coarse `"analyzing"`/`"debating"` phases into `jobs.progress`) → `update_job_status(ready|failed)`. When idle it periodically calls `enqueue_stale_refreshes()` to re-queue any `(ticker, horizon)` whose latest snapshot is past its freshness target (cron-replaceable in prod). Tune with `WORKER_POLL_SECONDS` (3) / `WORKER_REFRESH_SCAN_SECONDS` (300).
 
 ### LLM provider abstraction
 

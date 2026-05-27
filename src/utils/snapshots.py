@@ -19,7 +19,7 @@ from typing import Any, Optional
 from psycopg.types.json import Jsonb
 
 from utils.db import connect, ensure_schema
-from utils.horizons import Horizon, HorizonName
+from utils.horizons import HORIZONS, Horizon, HorizonName
 
 
 # ----------------------------------------------------------------- snapshots
@@ -136,17 +136,93 @@ def _job_row_to_dict(row: tuple) -> dict[str, Any]:
     return dict(zip(_JOB_COLS, row))
 
 
-def create_job(ticker: str, horizon: HorizonName) -> int:
-    """Insert a queued job; returns its id. The worker (22.5) picks it up."""
+def find_pending_job(ticker: str, horizon: HorizonName) -> Optional[dict]:
+    """Newest queued/running job for (ticker, horizon), or None."""
     ensure_schema()
     with connect() as conn, conn.cursor() as cur:
         cur.execute(
-            "INSERT INTO jobs (ticker, horizon) VALUES (%s, %s) RETURNING id",
+            f"SELECT {', '.join(_JOB_COLS)} FROM jobs "
+            "WHERE ticker = %s AND horizon = %s AND status IN ('queued', 'running') "
+            "ORDER BY requested_at DESC LIMIT 1",
             (ticker.upper(), horizon),
         )
-        job_id = cur.fetchone()[0]
+        row = cur.fetchone()
+    return _job_row_to_dict(row) if row else None
+
+
+def create_job(ticker: str, horizon: HorizonName) -> int:
+    """Enqueue a job and return its id. Idempotent per in-flight (ticker,
+    horizon): the `jobs_pending_uniq` partial index makes ON CONFLICT DO NOTHING
+    race-safe, so concurrent on-demand requests reuse the same job."""
+    ensure_schema()
+    with connect() as conn, conn.cursor() as cur:
+        cur.execute(
+            "INSERT INTO jobs (ticker, horizon) VALUES (%s, %s) "
+            "ON CONFLICT (ticker, horizon) WHERE status IN ('queued', 'running') "
+            "DO NOTHING RETURNING id",
+            (ticker.upper(), horizon),
+        )
+        row = cur.fetchone()
         conn.commit()
-    return job_id
+    if row:
+        return row[0]
+    existing = find_pending_job(ticker, horizon)
+    if existing is None:
+        # Extremely rare: the conflicting job changed state between insert and
+        # re-select. Retry once.
+        return create_job(ticker, horizon)
+    return existing["id"]
+
+
+def get_or_create_pending_job(ticker: str, horizon: HorizonName) -> dict:
+    """Return the in-flight job for (ticker, horizon), creating one if none."""
+    return get_job(create_job(ticker, horizon))
+
+
+def claim_next_job() -> Optional[dict]:
+    """Atomically claim the oldest queued job (flip to 'running', stamp
+    started_at) and return it, or None if the queue is empty. `FOR UPDATE SKIP
+    LOCKED` keeps this correct if more than one worker ever runs."""
+    ensure_schema()
+    with connect() as conn, conn.cursor() as cur:
+        cur.execute(
+            f"""UPDATE jobs
+                   SET status = 'running',
+                       started_at = COALESCE(started_at, now())
+                 WHERE id = (
+                     SELECT id FROM jobs WHERE status = 'queued'
+                     ORDER BY requested_at
+                     FOR UPDATE SKIP LOCKED LIMIT 1
+                 )
+                 RETURNING {', '.join(_JOB_COLS)}"""
+        )
+        row = cur.fetchone()
+        conn.commit()
+    return _job_row_to_dict(row) if row else None
+
+
+def enqueue_stale_refreshes() -> int:
+    """Enqueue refresh jobs for every (ticker, horizon) whose latest snapshot is
+    older than its horizon's freshness target. Idempotent via create_job's
+    dedup. Returns the number of stale pairs found."""
+    ensure_schema()
+    with connect() as conn, conn.cursor() as cur:
+        cur.execute(
+            "SELECT DISTINCT ON (ticker, horizon) ticker, horizon, generated_at "
+            "FROM snapshots ORDER BY ticker, horizon, generated_at DESC"
+        )
+        latest = cur.fetchall()
+
+    now = datetime.now(timezone.utc)
+    stale = 0
+    for ticker, horizon, generated_at in latest:
+        h = HORIZONS.get(horizon)
+        if h is None:
+            continue
+        if generated_at is None or (now - generated_at) >= timedelta(hours=h.freshness_hours):
+            create_job(ticker, horizon)
+            stale += 1
+    return stale
 
 
 def get_job(job_id: int) -> Optional[dict]:

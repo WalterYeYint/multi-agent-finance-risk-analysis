@@ -3,7 +3,7 @@ from __future__ import annotations
 import os
 import sys
 import time
-from typing import Optional, Tuple, Type
+from typing import Callable, Optional, Tuple, Type
 
 from langgraph.graph import StateGraph, END
 from langchain_core.runnables import RunnableConfig
@@ -91,6 +91,7 @@ def run_pipeline_for_horizon(
     end_date: Optional[str] = None,
     *,
     persist: bool = True,
+    progress_cb: Optional[Callable[[str], None]] = None,
 ) -> Tuple[State, Optional[int]]:
     """
     Programmatic entry point for the worker / API. Runs the chain graph then
@@ -99,8 +100,14 @@ def run_pipeline_for_horizon(
 
     The horizon preset (Short / Mid / Long → period + horizon_days) comes from
     utils.horizons; agents keep reading state.period / state.horizon_days as
-    today. Returns (final_state, snapshot_id_or_None).
+    today. `progress_cb`, if given, is called with a coarse phase label
+    ("analyzing", "debating") so a caller (the worker) can surface progress.
+    Returns (final_state, snapshot_id_or_None).
     """
+    def _progress(msg: str) -> None:
+        if progress_cb is not None:
+            progress_cb(msg)
+
     h = get_horizon(horizon_name)
     chain = build_chain_graph()
     state = State(
@@ -112,8 +119,10 @@ def run_pipeline_for_horizon(
     )
 
     t0 = time.time()
+    _progress("analyzing")
     final = State(**chain.invoke(state, config=RunnableConfig()))
 
+    _progress("debating")
     debate_graph = build_final_recommendation_graph()
     final.debate = DebateReport(
         agent_list=["fundamental", "sentiment", "valuation"])

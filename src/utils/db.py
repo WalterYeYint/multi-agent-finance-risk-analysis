@@ -123,6 +123,11 @@ CREATE TABLE IF NOT EXISTS jobs (
 
 CREATE INDEX IF NOT EXISTS jobs_status_idx         ON jobs (status, requested_at);
 CREATE INDEX IF NOT EXISTS jobs_ticker_horizon_idx ON jobs (ticker, horizon);
+
+-- At most one in-flight job per (ticker, horizon): lets create_job upsert with
+-- ON CONFLICT DO NOTHING so concurrent on-demand requests can't double-queue.
+CREATE UNIQUE INDEX IF NOT EXISTS jobs_pending_uniq
+    ON jobs (ticker, horizon) WHERE status IN ('queued', 'running');
 """
 
 _schema_ready = False
