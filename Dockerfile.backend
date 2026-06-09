@@ -1,7 +1,7 @@
 # Flask backend — read/enqueue path only. The pipeline itself runs in the worker.
 # Image used by AWS App Runner (and locally via docker-compose).
 
-FROM python:3.11-slim AS base
+FROM python:3.12-slim AS base
 
 ENV PYTHONDONTWRITEBYTECODE=1 \
     PYTHONUNBUFFERED=1 \

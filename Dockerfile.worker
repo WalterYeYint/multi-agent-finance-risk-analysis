@@ -1,7 +1,7 @@
 # Background worker — claims jobs, runs chain+debate pipeline, persists snapshots.
 # Image used by ECS Fargate (continuously running task).
 
-FROM python:3.11-slim AS base
+FROM python:3.12-slim AS base
 
 ENV PYTHONDONTWRITEBYTECODE=1 \
     PYTHONUNBUFFERED=1 \
