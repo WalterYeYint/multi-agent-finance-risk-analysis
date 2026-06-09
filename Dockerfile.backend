@@ -1,0 +1,45 @@
+# Flask backend — read/enqueue path only. The pipeline itself runs in the worker.
+# Image used by AWS App Runner (and locally via docker-compose).
+
+FROM python:3.11-slim AS base
+
+ENV PYTHONDONTWRITEBYTECODE=1 \
+    PYTHONUNBUFFERED=1 \
+    PIP_NO_CACHE_DIR=1 \
+    PIP_DISABLE_PIP_VERSION_CHECK=1
+
+# System libs needed by pgvector/psycopg, markdown-pdf (Cairo), matplotlib, etc.
+RUN apt-get update && apt-get install -y --no-install-recommends \
+        build-essential \
+        libpq5 \
+        libcairo2 \
+        libpango-1.0-0 \
+        libpangocairo-1.0-0 \
+        libgdk-pixbuf-2.0-0 \
+        libffi-dev \
+        curl \
+        && rm -rf /var/lib/apt/lists/*
+
+WORKDIR /app
+
+# Install deps first for layer caching.
+COPY requirements.txt ./
+RUN pip install -r requirements.txt
+
+# Copy only what the backend needs at runtime (src/ is required because backend/app.py
+# imports from utils.* and main; .dockerignore prunes the rest).
+COPY backend/ ./backend/
+COPY src/ ./src/
+
+ENV HOST=0.0.0.0 \
+    PORT=8000 \
+    FLASK_ENV=production \
+    ANALYZE_TIMEOUT_SECS=900
+
+EXPOSE 8000
+
+# App Runner sends GET / for health by default; the app exposes /api/health.
+HEALTHCHECK --interval=30s --timeout=5s --start-period=20s --retries=3 \
+    CMD curl -fsS http://localhost:${PORT}/api/health || exit 1
+
+CMD ["python", "-m", "backend.app"]

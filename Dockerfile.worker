@@ -1,0 +1,35 @@
+# Background worker — claims jobs, runs chain+debate pipeline, persists snapshots.
+# Image used by ECS Fargate (continuously running task).
+
+FROM python:3.11-slim AS base
+
+ENV PYTHONDONTWRITEBYTECODE=1 \
+    PYTHONUNBUFFERED=1 \
+    PIP_NO_CACHE_DIR=1 \
+    PIP_DISABLE_PIP_VERSION_CHECK=1
+
+# Same system libs as the backend image — the worker runs the same pipeline code,
+# including PDF generation when run_pipeline_for_horizon decides to.
+RUN apt-get update && apt-get install -y --no-install-recommends \
+        build-essential \
+        libpq5 \
+        libcairo2 \
+        libpango-1.0-0 \
+        libpangocairo-1.0-0 \
+        libgdk-pixbuf-2.0-0 \
+        libffi-dev \
+        && rm -rf /var/lib/apt/lists/*
+
+WORKDIR /app
+
+COPY requirements.txt ./
+RUN pip install -r requirements.txt
+
+# The worker only needs src/. backend/ is not imported.
+COPY src/ ./src/
+
+ENV WORKER_POLL_SECONDS=3 \
+    WORKER_REFRESH_SCAN_SECONDS=300
+
+# Single-process, single-worker: don't let docker restart cascade hide pipeline failures.
+CMD ["python", "-m", "src.worker"]

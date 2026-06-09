@@ -1,0 +1,33 @@
+.git
+.github
+.venv
+__pycache__
+*.pyc
+*.pyo
+*.pyd
+
+# Frontend is shipped to S3 — not built into the backend image
+frontend/
+
+# Local dev artifacts
+final_state*.json
+*.pdf
+AnalysisReport*.pdf
+data/filings_raw/
+visualizations/
+sample_outputs/
+
+# Docs / one-off scripts that aren't needed at runtime
+docs/
+*.md
+test_*.sh
+test_*.py
+run.sh
+chatgpt_ui.py
+docker-compose.yml
+langgraph.json
+
+# IDE
+.vscode
+.idea
+.DS_Store
