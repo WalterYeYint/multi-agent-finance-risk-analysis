@@ -74,3 +74,118 @@ jobs:
             ${{ steps.ecr-login.outputs.registry }}/${{ env.ECR_REPO_PREFIX }}-${{ matrix.service }}:${{ github.sha }}
           cache-from: type=gha,scope=${{ matrix.service }}
           cache-to: type=gha,mode=max,scope=${{ matrix.service }}
+
+  smoke-test:
+    name: smoke-test pulled images
+    needs: build
+    runs-on: ubuntu-latest
+
+    # Real Postgres + pgvector. The backend and worker reach it at localhost:5432
+    # via `docker run --network host` (Linux runners only).
+    services:
+      postgres:
+        image: pgvector/pgvector:pg16
+        env:
+          POSTGRES_USER: finance
+          POSTGRES_PASSWORD: finance
+          POSTGRES_DB: finance_rag
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd "pg_isready -U finance"
+          --health-interval 5s
+          --health-timeout 5s
+          --health-retries 10
+
+    env:
+      DATABASE_URL: postgresql://finance:finance@localhost:5432/finance_rag
+      IMAGE_TAG: ${{ github.sha }}
+
+    steps:
+      - name: Configure AWS credentials
+        uses: aws-actions/configure-aws-credentials@v4
+        with:
+          aws-access-key-id: ${{ secrets.AWS_ACCESS_KEY_ID }}
+          aws-secret-access-key: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
+          aws-region: ${{ env.AWS_REGION }}
+
+      - name: Log in to Amazon ECR
+        id: ecr-login
+        uses: aws-actions/amazon-ecr-login@v2
+
+      - name: Pull freshly-pushed images
+        run: |
+          REG="${{ steps.ecr-login.outputs.registry }}"
+          docker pull "$REG/${ECR_REPO_PREFIX}-backend:${IMAGE_TAG}"
+          docker pull "$REG/${ECR_REPO_PREFIX}-worker:${IMAGE_TAG}"
+
+      # --- Backend ---------------------------------------------------------
+      - name: Start backend container
+        run: |
+          REG="${{ steps.ecr-login.outputs.registry }}"
+          docker run -d --name backend --network host \
+            -e DATABASE_URL="$DATABASE_URL" \
+            -e MODEL_PROVIDER=ollama \
+            -e PORT=8000 \
+            "$REG/${ECR_REPO_PREFIX}-backend:${IMAGE_TAG}"
+
+      - name: Wait for /api/health to return 200
+        run: |
+          for i in $(seq 1 20); do
+            if curl -fsS http://localhost:8000/api/health; then
+              echo; echo "✓ backend /api/health is up after $((i*3))s"
+              exit 0
+            fi
+            echo "waiting for backend ($i/20)…"
+            sleep 3
+          done
+          echo "✗ backend never became healthy in 60s"
+          docker logs backend
+          exit 1
+
+      - name: Hit /api/tickers (exercises DB connection + ensure_schema)
+        run: |
+          BODY=$(curl -fsS -w '\n%{http_code}' http://localhost:8000/api/tickers)
+          STATUS=$(echo "$BODY" | tail -n1)
+          echo "status: $STATUS"
+          echo "body  : $(echo "$BODY" | head -n1)"
+          [ "$STATUS" = "200" ] || { echo "✗ /api/tickers returned $STATUS"; docker logs backend; exit 1; }
+          echo "✓ /api/tickers returned 200"
+
+      - name: Backend logs (always)
+        if: always()
+        run: docker logs backend || true
+
+      - name: Tear down backend
+        if: always()
+        run: docker rm -f backend || true
+
+      # --- Worker ----------------------------------------------------------
+      - name: Start worker container
+        run: |
+          REG="${{ steps.ecr-login.outputs.registry }}"
+          docker run -d --name worker --network host \
+            -e DATABASE_URL="$DATABASE_URL" \
+            -e MODEL_PROVIDER=ollama \
+            -e WORKER_POLL_SECONDS=3 \
+            -e WORKER_REFRESH_SCAN_SECONDS=300 \
+            "$REG/${ECR_REPO_PREFIX}-worker:${IMAGE_TAG}"
+
+      - name: Verify worker stays alive 20s (no crash on startup or first poll)
+        run: |
+          sleep 20
+          RUNNING=$(docker inspect -f '{{.State.Running}}' worker || echo missing)
+          if [ "$RUNNING" != "true" ]; then
+            echo "✗ worker exited within 20s (state: $RUNNING)"
+            docker logs worker
+            exit 1
+          fi
+          echo "✓ worker is still running after 20s"
+
+      - name: Worker logs (always)
+        if: always()
+        run: docker logs worker || true
+
+      - name: Tear down worker
+        if: always()
+        run: docker rm -f worker || true
