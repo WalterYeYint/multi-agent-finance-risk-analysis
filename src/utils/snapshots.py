@@ -13,6 +13,7 @@ about agents. The pipeline entry point lives in `src/main.py`
 
 from __future__ import annotations
 
+import math
 from datetime import datetime, timedelta, timezone
 from typing import Any, Optional
 
@@ -34,9 +35,30 @@ def _row_to_dict(row: tuple) -> dict[str, Any]:
     return dict(zip(_SNAPSHOT_COLS, row))
 
 
+def _sanitize_for_json(obj: Any) -> Any:
+    """Replace NaN / Infinity / -Infinity with None recursively.
+
+    Python's json module emits these as bare tokens by default (allow_nan=True),
+    which is *invalid* per RFC 8259. Postgres's JSON/JSONB type enforces the
+    RFC strictly and rejects them with `invalid input syntax for type json`.
+    We treat any non-finite float as "no signal" -> None at the storage boundary
+    so a single upstream divide-by-zero can't brick the whole snapshot write.
+    """
+    if isinstance(obj, float):
+        return obj if math.isfinite(obj) else None
+    if isinstance(obj, dict):
+        return {k: _sanitize_for_json(v) for k, v in obj.items()}
+    if isinstance(obj, (list, tuple)):
+        return [_sanitize_for_json(v) for v in obj]
+    return obj
+
+
 def _to_jsonb(model: Any) -> Optional[Jsonb]:
-    """Pydantic model -> Jsonb param, or None."""
-    return Jsonb(model.model_dump(mode="json")) if model is not None else None
+    """Pydantic model -> Jsonb param, or None. Strips NaN/Infinity at the
+    boundary because Postgres JSONB rejects them — see _sanitize_for_json."""
+    if model is None:
+        return None
+    return Jsonb(_sanitize_for_json(model.model_dump(mode="json")))
 
 
 def save_snapshot(*, ticker: str, horizon: HorizonName, state: Any,
