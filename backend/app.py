@@ -22,6 +22,9 @@ from utils.snapshots import (
 
 from markdown_pdf import MarkdownPdf, Section
 
+from threading import Lock
+from cachetools import TTLCache, cached
+
 app = Flask(__name__)
 CORS(app)
 
@@ -148,11 +151,43 @@ def _job_response(job: dict, http_status: int = 202):
     }), http_status
 
 
+# In-process TTL cache for the snapshot read path. Collapses thundering-herd
+# duplicates of the same (ticker, horizon) read down to one DB roundtrip per TTL
+# window per backend instance — important because the worker writes asynchronously
+# and the read path is many-to-one.
+#
+# TTL <= 60s ensures worker writes propagate within a minute, which is well inside
+# every horizon's freshness window (Short 24h / Mid 72h / Long 168h). Cache keys
+# are normalized at every call site (ticker uppercased) so 'aapl' and 'AAPL' share
+# an entry.
+_SNAPSHOT_TTL_S = 60
+_TICKERS_TTL_S = 300
+_cache_lock = Lock()
+_snapshot_cache: TTLCache = TTLCache(maxsize=1024, ttl=_SNAPSHOT_TTL_S)
+_history_cache: TTLCache = TTLCache(maxsize=512, ttl=_SNAPSHOT_TTL_S)
+_tickers_cache: TTLCache = TTLCache(maxsize=4, ttl=_TICKERS_TTL_S)
+
+
+@cached(cache=_snapshot_cache, lock=_cache_lock)
+def _cached_latest_snapshot(ticker: str, horizon_name: str):
+    return get_latest_snapshot(ticker, horizon_name)
+
+
+@cached(cache=_history_cache, lock=_cache_lock)
+def _cached_snapshot_history(ticker: str, horizon_name: str, days: int):
+    return list_snapshot_history(ticker, horizon_name, days=days)
+
+
+@cached(cache=_tickers_cache, lock=_cache_lock)
+def _cached_tracked_tickers():
+    return list_tracked_tickers()
+
+
 def _resolve_snapshot(ticker: str, horizon):
     """Cache-or-enqueue. Fresh cache → 200 + snapshot. Otherwise enqueue a job
     (deduped per ticker+horizon) for the worker and return 202 + job info; the
     client polls this same endpoint until the snapshot is fresh."""
-    cached = get_latest_snapshot(ticker, horizon.name)
+    cached = _cached_latest_snapshot(ticker, horizon.name)
     if cached and is_fresh(cached, horizon):
         return jsonify(_attach_pdf(_serialize_snapshot(cached, cached=True)))
 
@@ -215,7 +250,7 @@ def snapshot_history(ticker, horizon):
         days = int(request.args.get('days', 90))
     except ValueError:
         days = 90
-    rows = list_snapshot_history(ticker.strip().upper(), h.name, days=days)
+    rows = _cached_snapshot_history(ticker.strip().upper(), h.name, days)
     history = [
         {
             'generated_at': r['generated_at'].isoformat() if r.get('generated_at') else None,
@@ -239,7 +274,7 @@ def list_tickers():
             'last_updated': t['last_updated'].isoformat() if t.get('last_updated') else None,
             'snapshot_count': t['snapshot_count'],
         }
-        for t in list_tracked_tickers()
+        for t in _cached_tracked_tickers()
     ]
     return jsonify({'horizons': list(HORIZONS), 'tickers': tickers})
 
