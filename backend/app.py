@@ -51,6 +51,16 @@ def _is_ollama_available():
         return False
 
 
+@app.route('/', methods=['GET'])
+def root():
+    """Root endpoint for load-balancer health checks. ECS Express Mode's
+    auto-provisioned ALB defaults its health-check path to '/' (the deploy
+    action doesn't expose a way to override it), so this must return 200 and
+    must NOT touch the DB — otherwise the target is marked unhealthy and the
+    ALB serves 503 to everything."""
+    return jsonify({'status': 'ok', 'service': 'finance-risk-analysis-api'})
+
+
 @app.route('/api/health', methods=['GET'])
 def health_check():
     return jsonify({'status': 'healthy', 'message': 'Finance Risk Analysis API is running'})

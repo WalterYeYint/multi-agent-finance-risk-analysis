@@ -327,6 +327,33 @@ for chunk in results:
     print(chunk.page_content)
 ``` -->
 
+## ☁️ Deployment (AWS)
+
+Full deployment guide: **[AWS_DEPLOYMENT.md](AWS_DEPLOYMENT.md)** · architecture diagram: [AWS_DEPLOYMENT.drawio.xml](AWS_DEPLOYMENT.drawio.xml).
+
+**Shape** (cost-optimized "Option B-lite-lite", ~$41/mo idle):
+
+| Component | Hosted on |
+|---|---|
+| Flask backend (reads / enqueues) | ECS Express Mode (Fargate + managed ALB + HTTPS URL) |
+| Worker (runs the chain + debate pipeline) | ECS Fargate (continuous) |
+| Postgres + pgvector (snapshots, jobs, filings) | Supabase (free tier) or RDS `t4g.micro` |
+| React frontend | S3 + CloudFront |
+
+**Deploys are CI-driven.** [`.github/workflows/build-and-push.yml`](.github/workflows/build-and-push.yml) runs `build → smoke-test → deploy` on every push to `main`: it builds both images, pushes to ECR, smoke-tests them against a throwaway Postgres, then creates/updates the Express service. The worker is redeployed in the same job.
+
+**One-time manual setup** (the parts CI can't or shouldn't do for you — full commands in [AWS_DEPLOYMENT.md](AWS_DEPLOYMENT.md)):
+
+1. **Database** — create the Supabase project, enable the `vector` extension, grab `DATABASE_URL` (Step 1).
+2. **ECR repos** — `aws ecr create-repository` for `finance-agents-backend` and `finance-agents-worker` (Step 2).
+3. **Secrets Manager** — store `DATABASE_URL` + `OPENAI_API_KEY`; grant the execution role `GetSecretValue` (Step 3.5).
+4. **Deploy IAM user** — attach ECR + ECS Express + `iam:PassRole` permissions to the user whose keys are in GitHub (Step 3.6a). *(This is the `ecs:DescribeServices ... not authorized` fix.)*
+5. **Service-linked roles** — `create-service-linked-role` for ECS, ELB, and app-autoscaling, once per fresh account (Step 3.6b). *(This is the `Unable to assume the service linked role` fix.)*
+6. **IAM roles** — `ecsTaskExecutionRole` + `ecsInfrastructureRoleForExpressServices` (Step 4a).
+7. **GitHub repo secrets** — `AWS_ACCESS_KEY_ID`, `AWS_SECRET_ACCESS_KEY`, `ECS_EXEC_ROLE_ARN`, `ECS_INFRA_ROLE_ARN`, `DATABASE_URL_SECRET_ARN`, `OPENAI_KEY_SECRET_ARN` (Step 4b).
+
+Once 1–7 are done, every push to `main` deploys. The `.env` file is local-dev only — it is **not** shipped to AWS; runtime config is injected via the ECS task definition and Secrets Manager.
+
 ## 📚 Additional Documentation
 
 - **LangSmith Traces**: Monitor agent execution at [smith.langchain.com](https://smith.langchain.com/)

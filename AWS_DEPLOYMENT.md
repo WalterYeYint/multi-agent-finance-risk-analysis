@@ -71,7 +71,7 @@ Two containers built from the same source tree (`Dockerfile.backend`, `Dockerfil
 Set these once at the top of your shell session — every command below uses them:
 
 ```bash
-export AWS_REGION=ap-southeast-2
+export AWS_REGION=us-east-2
 export AWS_ACCOUNT_ID=$(aws sts get-caller-identity --query Account --output text)
 export PROJECT=finance-agents
 ```
@@ -270,6 +270,77 @@ The deploy job already passes them as the `secrets:` input to `aws-actions/amazo
 
 ---
 
+## Step 3.6 — Account + CI bootstrap (one-time)
+
+> **These two steps are easy to miss** because nothing in the repo references them — they're account-level prerequisites. They were the cause of the two errors most people hit on their first deploy:
+> - `User ... is not authorized to perform: ecs:DescribeServices` → deploy user is missing ECS permissions (3.6a)
+> - `Unable to assume the service linked role. Please verify that the ECS service linked role exists.` → fresh account has no ECS/ELB/autoscaling service-linked roles (3.6b)
+
+### 3.6a — Grant the deploy IAM user ECS Express permissions
+
+The IAM user behind your GitHub Actions keys (`AWS_ACCESS_KEY_ID` / `AWS_SECRET_ACCESS_KEY`) needs **two** permission sets:
+
+1. **ECR** (for `build` / push) — attach the AWS-managed `AmazonEC2ContainerRegistryPowerUser`, or an equivalent scoped policy. (If your build+push already succeeds, this is done.)
+2. **ECS Express + PassRole** (for the `deploy` job) — not covered by any single managed policy, so attach this inline policy:
+
+```bash
+export DEPLOY_IAM_USER=<your-ci-iam-user>   # e.g. the user whose keys are in GitHub secrets
+
+aws iam put-user-policy \
+  --user-name "$DEPLOY_IAM_USER" \
+  --policy-name GitHubActionsECSExpressDeploy \
+  --policy-document "$(cat <<EOF
+{
+  "Version": "2012-10-17",
+  "Statement": [
+    {
+      "Sid": "ECSExpressDeploy",
+      "Effect": "Allow",
+      "Action": [
+        "ecs:CreateCluster",
+        "ecs:RegisterTaskDefinition",
+        "ecs:CreateExpressGatewayService",
+        "ecs:UpdateExpressGatewayService",
+        "ecs:DescribeExpressGatewayService",
+        "ecs:DescribeClusters",
+        "ecs:DescribeServices",
+        "ecs:ListServiceDeployments",
+        "ecs:DescribeServiceDeployments",
+        "ecs:UpdateService"
+      ],
+      "Resource": "*"
+    },
+    {
+      "Sid": "PassExpressRoles",
+      "Effect": "Allow",
+      "Action": "iam:PassRole",
+      "Resource": [
+        "arn:aws:iam::${AWS_ACCOUNT_ID}:role/ecsTaskExecutionRole",
+        "arn:aws:iam::${AWS_ACCOUNT_ID}:role/ecsInfrastructureRoleForExpressServices"
+      ]
+    }
+  ]
+}
+EOF
+)"
+```
+
+The `iam:PassRole` block references the two roles from [Step 4a](#4a--iam-roles-one-time). The policy attaches fine before those roles exist — but the roles must exist by deploy time, so do Step 4a too (order between 3.6a and 4a doesn't matter).
+
+### 3.6b — Create the ECS service-linked roles
+
+On a **fresh account that has never used ECS via the console**, the service-linked roles ECS needs to manage networking, the load balancer, and auto-scaling don't exist yet. Create all three once (account-wide, free; an "already exists / has been taken" error is harmless):
+
+```bash
+aws iam create-service-linked-role --aws-service-name ecs.amazonaws.com
+aws iam create-service-linked-role --aws-service-name elasticloadbalancing.amazonaws.com
+aws iam create-service-linked-role --aws-service-name ecs.application-autoscaling.amazonaws.com
+```
+
+> These are distinct from the two roles in Step 4a. The Step 4a roles are what your *containers* assume (pull images, read secrets, provision the ALB). The service-linked roles are what the ECS *service itself* assumes to operate — you never reference them directly, AWS just needs them to exist.
+
+---
+
 ## Step 4 — Backend (ECS Express Mode)
 
 > **Why not App Runner?** AWS announced on 30 Apr 2026 that App Runner stopped accepting new customers, and the recommended replacement is **Amazon ECS Express Mode** (launched 21 Nov 2025). Express Mode is the spiritual successor: provide a container image and two IAM roles, and ECS provisions a Fargate service + Application Load Balancer + auto-scaling + a `*.ecs.<region>.on.aws` HTTPS URL with a single API call. No extra charge for Express Mode itself — you pay only for the Fargate compute + ALB underneath.
@@ -316,7 +387,37 @@ export EXEC_ROLE_ARN=$(aws iam get-role --role-name ecsTaskExecutionRole --query
 export INFRA_ROLE_ARN=$(aws iam get-role --role-name ecsInfrastructureRoleForExpressServices --query 'Role.Arn' --output text)
 ```
 
-### 4b — Create the Express service
+### 4b — Deploy the backend
+
+There are two ways to create/update the Express service. **Path A (GitHub Actions) is the one this repo is wired for and the recommended path** — it builds, smoke-tests, and deploys on every push to `main`. Path B is the manual equivalent, kept for reference and one-off debugging.
+
+#### Path A — GitHub Actions (recommended)
+
+The [`.github/workflows/build-and-push.yml`](.github/workflows/build-and-push.yml) workflow runs `build → smoke-test → deploy`. The `deploy` job calls `aws-actions/amazon-ecs-deploy-express-service`, which **creates the service on the first run and updates it (new image + re-asserted env) on every run after**. No manual `create-express-gateway-service` needed.
+
+Set these **GitHub repo secrets** (Settings → Secrets and variables → Actions) so the deploy job is fully configured — if any is missing, the deploy step skips with a warning naming the gap:
+
+| GitHub repo secret | Value | From |
+|---|---|---|
+| `AWS_ACCESS_KEY_ID` / `AWS_SECRET_ACCESS_KEY` | the deploy IAM user's keys | [3.6a](#36a--grant-the-deploy-iam-user-ecs-express-permissions) |
+| `ECS_EXEC_ROLE_ARN` | `ecsTaskExecutionRole` ARN | [4a](#4a--iam-roles-one-time) (`$EXEC_ROLE_ARN`) |
+| `ECS_INFRA_ROLE_ARN` | `ecsInfrastructureRoleForExpressServices` ARN | [4a](#4a--iam-roles-one-time) (`$INFRA_ROLE_ARN`) |
+| `DATABASE_URL_SECRET_ARN` | Secrets Manager ARN | [3.5](#step-35--secrets-secrets-manager) |
+| `OPENAI_KEY_SECRET_ARN` | Secrets Manager ARN | [3.5](#step-35--secrets-secrets-manager) |
+
+Then push to `main` (or run the workflow manually from the Actions tab). On success the deploy log prints the service URL. The full prerequisite chain for a green deploy, in order:
+
+1. ECR repos exist ([Step 2](#step-2--container-registry-two-ecr-repos))
+2. Secrets Manager secrets + execution-role grant ([Step 3.5](#step-35--secrets-secrets-manager))
+3. Deploy-user ECS policy ([3.6a](#36a--grant-the-deploy-iam-user-ecs-express-permissions)) + service-linked roles ([3.6b](#36b--create-the-ecs-service-linked-roles))
+4. The two IAM roles ([4a](#4a--iam-roles-one-time))
+5. All five GitHub repo secrets above
+
+The `container-port` (8000), `environment-variables` (`MODEL_PROVIDER=openai`), and `secrets` (DB + OpenAI ARNs) are already set in the workflow's deploy step — see [build-and-push.yml](.github/workflows/build-and-push.yml).
+
+#### Path B — Manual CLI (alternative)
+
+> Demo-grade: this inlines the secret **values** as plaintext env. For anything real, swap `environment` for the `secrets`/`valueFrom` form (see Step 3.5) so the values come from Secrets Manager instead.
 
 ```bash
 aws ecs create-express-gateway-service \
@@ -383,6 +484,26 @@ The worker polls every 3 s and must run continuously. Unlike the backend, it doe
 # 5a) Create cluster
 aws ecs create-cluster --cluster-name $PROJECT --region $AWS_REGION
 
+# 5a-2) The task def below uses "awslogs-create-group": "true", which makes the
+# log driver create the CloudWatch group at task start. The AWS-managed
+# AmazonECSTaskExecutionRolePolicy grants CreateLogStream/PutLogEvents but NOT
+# CreateLogGroup — so without this grant every task dies at init with
+# "ResourceInitializationError ... not authorized to perform: logs:CreateLogGroup".
+aws iam put-role-policy \
+  --role-name ecsTaskExecutionRole \
+  --policy-name CreateEcsLogGroups \
+  --policy-document "$(cat <<EOF
+{
+  "Version": "2012-10-17",
+  "Statement": [{
+    "Effect": "Allow",
+    "Action": "logs:CreateLogGroup",
+    "Resource": "arn:aws:logs:${AWS_REGION}:${AWS_ACCOUNT_ID}:log-group:/ecs/*"
+  }]
+}
+EOF
+)"
+
 # 5b) Task definition (save as task-worker.json then register)
 cat > task-worker.json <<EOF
 {
@@ -391,18 +512,20 @@ cat > task-worker.json <<EOF
   "requiresCompatibilities": ["FARGATE"],
   "cpu": "256",
   "memory": "1024",
-  "executionRoleArn": "arn:aws:iam::$AWS_ACCOUNT_ID:role/ecsTaskExecutionRole",
+  "executionRoleArn": "arn:aws:iam::${AWS_ACCOUNT_ID}:role/ecsTaskExecutionRole",
   "containerDefinitions": [{
     "name": "worker",
     "image": "$AWS_ACCOUNT_ID.dkr.ecr.$AWS_REGION.amazonaws.com/$PROJECT-worker:latest",
     "essential": true,
     "environment": [
-      {"name": "DATABASE_URL",         "value": "$DATABASE_URL"},
-      {"name": "OPENAI_API_KEY",       "value": "sk-..."},
       {"name": "MODEL_PROVIDER",       "value": "openai"},
       {"name": "SEC_USER_AGENT",       "value": "Your Name <you@example.com>"},
       {"name": "WORKER_POLL_SECONDS",  "value": "3"},
       {"name": "WORKER_REFRESH_SCAN_SECONDS", "value": "300"}
+    ],
+    "secrets": [
+      {"name": "DATABASE_URL",   "valueFrom": "$DATABASE_URL_SECRET_ARN"},
+      {"name": "OPENAI_API_KEY", "valueFrom": "$OPENAI_KEY_SECRET_ARN"}
     ],
     "logConfiguration": {
       "logDriver": "awslogs",
@@ -422,11 +545,23 @@ aws ecs register-task-definition --cli-input-json file://task-worker.json
 # 5c) Service: desired-count = 1 (single-worker by design — serial pipeline)
 #
 # Network config differs by DB choice:
-#   Option A (Supabase): any SG that allows outbound 443/5432; the default VPC's
-#                        default SG works. Public IP needed for internet egress.
+#   Option A (Supabase): any SG with outbound internet; the default VPC's default
+#                        SG works. Public IP needed so the task can reach Supabase
+#                        + OpenAI over the internet.
 #   Option B (RDS):      use $DB_SG_ID so the worker inherits the SG-to-SG
 #                        ingress rule on the RDS security group.
-export WORKER_SG_ID=$DB_SG_ID  # or substitute the default SG for Option A
+#
+# Option A only — derive the default VPC's subnets + default SG (Supabase users
+# skipped Step 1's Option B block, so $SUBNET_IDS / $DB_SG_ID aren't set yet):
+export VPC_ID=$(aws ec2 describe-vpcs --filters Name=is-default,Values=true \
+   --query 'Vpcs[0].VpcId' --output text --region $AWS_REGION)
+export SUBNET_IDS=$(aws ec2 describe-subnets --filters Name=vpc-id,Values=$VPC_ID \
+   --query 'Subnets[0:2].SubnetId' --output text --region $AWS_REGION | tr '\t' ',')
+export WORKER_SG_ID=$(aws ec2 describe-security-groups \
+   --filters Name=vpc-id,Values=$VPC_ID Name=group-name,Values=default \
+   --query 'SecurityGroups[0].GroupId' --output text --region $AWS_REGION)
+
+# Option B (RDS) instead: export WORKER_SG_ID=$DB_SG_ID  (reuse Step 1's SG + subnets)
 
 aws ecs create-service \
    --cluster $PROJECT \
@@ -583,9 +718,12 @@ aws ecr delete-repository --repository-name $PROJECT-worker  --force
 
 ## Troubleshooting
 
+- **`User ... is not authorized to perform: ecs:DescribeServices`** (or any other `ecs:*` action) in the GitHub Actions deploy job — the deploy IAM user lacks ECS Express permissions. Attach the policy in [Step 3.6a](#36a--grant-the-deploy-iam-user-ecs-express-permissions). The error names the *first* missing action; the policy covers them all so you won't hit them one at a time.
+- **`Unable to assume the service linked role. Please verify that the ECS service linked role exists.`** — fresh account with no ECS/ELB/autoscaling service-linked roles. Run the three `create-service-linked-role` commands in [Step 3.6b](#36b--create-the-ecs-service-linked-roles).
+- **Worker tasks fail at init with `ResourceInitializationError ... not authorized to perform: logs:CreateLogGroup`** — the task def's `awslogs-create-group: true` needs `logs:CreateLogGroup`, which the managed execution-role policy doesn't grant. Run the `put-role-policy` in [Step 5a-2](#step-5--worker-ecs-fargate). The service self-heals on the next task retry — no redeploy needed.
 - **`aws ecs create-express-gateway-service` stuck at PROVISIONING** — `--monitor-resources` prints exactly which sub-resource (target group, ALB, listener, service) is taking time. Most stalls are VPC-route issues; Option B (RDS) hits these when the service is created in a subnet without a route to the RDS subnet. Option A (Supabase) hits this rarely — the default-VPC config Express Mode picks works out-of-the-box for public-internet egress.
 - **`AccessDeniedException` on `iam:PassRole`** — your deploy IAM user can pass the ExecutionRole and InfrastructureRole ARNs. Add an `iam:PassRole` statement scoped to those two role ARNs, or attach `AmazonECS_FullAccess` to the deploy user temporarily.
-- **Express Mode service URL returns 503** — ALB health check is failing. Confirm `containerPort: 8000` matches Dockerfile.backend, and that `--health-check-path "/api/health"` points at an endpoint that returns 200 without touching the DB. Inspect with `aws ecs describe-express-gateway-service --service-arn ...`.
+- **Express Mode service URL returns 503 with the task RUNNING (no stopped tasks)** — the ALB health check is failing, so the only target is marked unhealthy. The most common cause on the **GitHub Actions deploy path**: the `aws-actions/amazon-ecs-deploy-express-service` action doesn't expose a `health-check-path` input, so the ALB defaults to `/` — and the Flask app 404s on `/` unless it has a root route. The backend defines a lightweight `@app.route('/')` returning 200 (no DB) for exactly this; if you removed it, the 503 returns. (The manual CLI path in 4b sets `--health-check-path "/api/health"` instead.) Confirm `containerPort: 8000` matches Dockerfile.backend, and inspect with `aws ecs describe-express-gateway-service --service-arn ...`.
 - **Worker exits with `psycopg.OperationalError`** —
   - *Option A:* `DATABASE_URL` is wrong (most often you pasted the pooled URL on port 6543 and the worker needs the direct URL on 5432), or the password contains URL-unsafe characters that weren't percent-encoded.
   - *Option B:* Fargate task's security group isn't in the DB's allowed ingress list, or the DB endpoint isn't reachable from the task's subnet.
