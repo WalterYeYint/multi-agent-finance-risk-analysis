@@ -203,7 +203,9 @@ The containers need two **secret** values at runtime — `DATABASE_URL` (your Su
 
 > **Why not GitHub Actions secrets?** Those authenticate the *deploy pipeline* to AWS (build/push/deploy). They are a different plane from the *app's* runtime config. The app's secret **values** never need to touch GitHub — the workflow references only the Secrets Manager **ARNs**, which aren't sensitive.
 
-### Create the two secrets
+### Create the secrets
+
+Three runtime secrets: `DATABASE_URL` + `OPENAI_API_KEY` (needed by both backend and worker) and `POLYGON_API_KEY` (worker only — for real news; without it the pipeline falls back to *synthetic* news).
 
 ```bash
 # Pull the values straight from your local .env (they never get committed).
@@ -219,13 +221,21 @@ aws secretsmanager create-secret \
    --secret-string "$OPENAI_API_KEY" \
    --region $AWS_REGION
 
+aws secretsmanager create-secret \
+   --name $PROJECT/polygon-key \
+   --secret-string "$POLYGON_API_KEY" \
+   --region $AWS_REGION
+
 # Capture the ARNs — the deploy step and the worker task definition reference these.
 export DATABASE_URL_SECRET_ARN=$(aws secretsmanager describe-secret \
    --secret-id $PROJECT/database-url --query ARN --output text --region $AWS_REGION)
 export OPENAI_KEY_SECRET_ARN=$(aws secretsmanager describe-secret \
    --secret-id $PROJECT/openai-key --query ARN --output text --region $AWS_REGION)
+export POLYGON_KEY_SECRET_ARN=$(aws secretsmanager describe-secret \
+   --secret-id $PROJECT/polygon-key --query ARN --output text --region $AWS_REGION)
 echo "$DATABASE_URL_SECRET_ARN"
 echo "$OPENAI_KEY_SECRET_ARN"
+echo "$POLYGON_KEY_SECRET_ARN"
 ```
 
 > To rotate a value later: `aws secretsmanager put-secret-value --secret-id $PROJECT/openai-key --secret-string "sk-new..."`. The next container start picks it up — no image rebuild.
@@ -244,7 +254,7 @@ aws iam put-role-policy \
   "Statement": [{
     "Effect": "Allow",
     "Action": "secretsmanager:GetSecretValue",
-    "Resource": ["$DATABASE_URL_SECRET_ARN", "$OPENAI_KEY_SECRET_ARN"]
+    "Resource": ["$DATABASE_URL_SECRET_ARN", "$OPENAI_KEY_SECRET_ARN", "$POLYGON_KEY_SECRET_ARN"]
   }]
 }
 EOF
@@ -404,6 +414,7 @@ Set these **GitHub repo secrets** (Settings → Secrets and variables → Action
 | `ECS_INFRA_ROLE_ARN` | `ecsInfrastructureRoleForExpressServices` ARN | [4a](#4a--iam-roles-one-time) (`$INFRA_ROLE_ARN`) |
 | `DATABASE_URL_SECRET_ARN` | Secrets Manager ARN | [3.5](#step-35--secrets-secrets-manager) |
 | `OPENAI_KEY_SECRET_ARN` | Secrets Manager ARN | [3.5](#step-35--secrets-secrets-manager) |
+| `POLYGON_KEY_SECRET_ARN` | Secrets Manager ARN | [3.5](#step-35--secrets-secrets-manager) — backend needs it because `/api/price` serves from Polygon |
 
 Then push to `main` (or run the workflow manually from the Actions tab). On success the deploy log prints the service URL. The full prerequisite chain for a green deploy, in order:
 
@@ -443,13 +454,22 @@ aws ecs create-express-gateway-service \
 
 `--monitor-resources` streams provisioning status to stdout (ALB, target group, service, etc.) and exits once `ACTIVE`. Total time: ~3–5 min on a fresh region.
 
-The service URL is printed on completion, in the format:
+The service URL is printed on completion. **It is an opaque, auto-generated hostname — NOT derived from the service name** — of the form:
 
 ```
-https://finance-agents-backend.ecs.us-east-2.on.aws/
+https://fi-<32-hex-chars>.ecs.<region>.on.aws/
+# e.g. https://fi-b4d4a94c3b834d5faaa5d465255181de.ecs.us-east-2.on.aws/
 ```
 
-Record it — the frontend's `REACT_APP_API_URL` needs it.
+**Record this exact hostname** — you cannot guess or reconstruct it from `finance-agents-backend`. It's the CloudFront `/api/*` origin in Step 6. Retrieve it any time from the ECS console (the Express service page) or:
+
+```bash
+aws ecs describe-express-gateway-service \
+  --service-arn arn:aws:ecs:$AWS_REGION:$AWS_ACCOUNT_ID:service/default/finance-agents-backend \
+  --region $AWS_REGION
+```
+
+(Look for the URL/endpoint field in the output.) Export it for the steps below: `export BACKEND_URL=fi-xxxxxxxx.ecs.$AWS_REGION.on.aws`.
 
 ### 4c — Note on networking by DB choice
 
@@ -524,8 +544,9 @@ cat > task-worker.json <<EOF
       {"name": "WORKER_REFRESH_SCAN_SECONDS", "value": "300"}
     ],
     "secrets": [
-      {"name": "DATABASE_URL",   "valueFrom": "$DATABASE_URL_SECRET_ARN"},
-      {"name": "OPENAI_API_KEY", "valueFrom": "$OPENAI_KEY_SECRET_ARN"}
+      {"name": "DATABASE_URL",    "valueFrom": "$DATABASE_URL_SECRET_ARN"},
+      {"name": "OPENAI_API_KEY",  "valueFrom": "$OPENAI_KEY_SECRET_ARN"},
+      {"name": "POLYGON_API_KEY", "valueFrom": "$POLYGON_KEY_SECRET_ARN"}
     ],
     "logConfiguration": {
       "logDriver": "awslogs",
@@ -574,26 +595,89 @@ aws ecs create-service \
 
 > **Fargate Spot variant.** Add `--capacity-provider-strategy capacityProvider=FARGATE_SPOT,weight=1` instead of `--launch-type FARGATE` to drop the worker bill by ~70 %. Spot can be interrupted; the worker handles that fine because `claim_next_job` is `FOR UPDATE SKIP LOCKED` — an interrupted job goes back to `queued` and the next instance picks it up.
 
-## Step 6 — Frontend (S3 + CloudFront)
+### 5d — Updating the worker's env/secrets later
+
+> **The worker is NOT CI-managed** (unlike the backend, whose env lives in the GitHub Actions deploy step). The worker's env/secrets live in the **task definition**, and the `build-and-push.yml` worker step only does `update-service --force-new-deployment` — it restarts the worker with the latest image but **reuses the current task-def revision and never changes env**. Adding a value to GitHub repo secrets does nothing for the worker.
+
+To add or change a worker env var or secret (e.g. add `POLYGON_API_KEY`):
 
 ```bash
-# 6a) Point the React app at the Express Mode URL
-cd frontend
-echo "REACT_APP_API_URL=https://finance-agents-backend.ecs.us-east-2.on.aws" > .env.production
-npm run build
-cd ..
+# 1. (secrets only) create it + grant the execution role — see Step 3.5
+# 2. Edit task-worker.json: add to "environment" (plain) or "secrets" (valueFrom)
+# 3. Register a new revision and roll the service onto it:
+aws ecs register-task-definition --cli-input-json file://task-worker.json --region $AWS_REGION
+aws ecs update-service --cluster $PROJECT --service $PROJECT-worker \
+   --task-definition $PROJECT-worker --region $AWS_REGION
+```
+
+`update-service --task-definition $PROJECT-worker` (family name, no `:revision`) rolls onto the latest ACTIVE revision. *(To remove this manual dance entirely, give the worker its own CI deploy job that renders + registers the task def on push — a TODO, not yet wired.)*
+
+## Step 6 — Frontend (S3 + CloudFront)
+
+> **The frontend calls the API with relative `/api/...` paths** (no `REACT_APP_API_URL` in the code). That means CloudFront must serve **both** the static app *and* the API under one domain — S3 for `/*`, the Express backend for `/api/*`. Do NOT set `REACT_APP_API_URL`; the code ignores it. The two-origins setup below is what makes the relative paths resolve (and it's what the [scaling plan](#cost-comparison-vs-option-b-lite) builds on — edge-caching the API later is just swapping the `/api/*` cache policy).
+
+```bash
+# 6a) Build the static app (no API URL baked in — paths are relative)
+cd frontend && npm run build && cd ..
 
 # 6b) Bucket + upload
 export FE_BUCKET=$PROJECT-ui-$AWS_ACCOUNT_ID
 aws s3 mb s3://$FE_BUCKET --region $AWS_REGION
 aws s3 sync frontend/build/ s3://$FE_BUCKET --delete
-
-# 6c) CloudFront: console is faster than CLI here.
-#     - Origin: $FE_BUCKET (use OAC, not the legacy OAI)
-#     - Default root object: index.html
-#     - Error 403 / 404 → /index.html with 200 (SPA routing)
-#     - Cache policy: CachingOptimized
 ```
+
+**6c) CloudFront — two origins (console is far easier than the CLI for this):**
+
+*Origin 1 — the static app:*
+- Origin domain: `$FE_BUCKET` (S3), access via **OAC** (not the legacy OAI)
+- Default root object: `index.html`
+- Default behavior (`*`): cache policy `CachingOptimized`
+- Custom error responses: `403 → /index.html (200)` and `404 → /index.html (200)` — SPA routing so deep links like `/t/AAPL` work
+
+*Origin 2 — the backend API:*
+- Create a second origin: domain = **your Express service's opaque hostname** `fi-<hex>.ecs.<region>.on.aws` (the `$BACKEND_URL` from Step 4b — host only, no `https://`, no trailing `/`), **HTTPS only**, name `backend-express`. ⚠️ This is *not* `finance-agents-backend.ecs...` — Express generates a random hostname; a guessed/typo'd value gives CloudFront a `502: couldn't resolve the origin domain name`.
+- Add a behavior: **path pattern `/api/*`** → origin `backend-express`
+  - Allowed methods: GET, HEAD, OPTIONS, PUT, POST, PATCH, DELETE (POST for `/api/analyze`)
+  - Cache policy: **`CachingDisabled`** (the API doesn't send cache headers yet; revisit for the scaling plan)
+  - Origin request policy: **`AllViewerExceptHostHeader`** — forwards query strings (`?period=` is load-bearing for the price chart) and sets `Host` to the origin, which a custom/ALB origin requires
+
+> `/api/*` is more specific than the default `*`, so CloudFront routes API calls to the backend and everything else to S3 automatically.
+>
+> **Common failure:** a frontend that loads but every API call returns **403** means the `/api/*` behavior is missing — `/api/*` is falling through to the S3 origin, which 403s on the nonexistent key. **Sparklines all identical** means the `/api/*` behavior's policy is stripping query strings — use `AllViewerExceptHostHeader`.
+
+### 6d — Automating with GitHub Actions
+
+Once the bucket + distribution exist (the manual 6a–6c above), [`.github/workflows/deploy-frontend.yml`](.github/workflows/deploy-frontend.yml) takes over: on every push to `main` touching `frontend/**`, it runs `npm ci && npm run build`, `s3 sync --delete` (with correct cache headers — immutable for fingerprinted assets, no-cache for `index.html`), and a CloudFront `/*` invalidation. It's a separate workflow from `build-and-push.yml` so frontend changes don't trigger backend Docker builds (and vice versa).
+
+**Deploy IAM user permissions** — the user behind the GitHub keys needs S3 write + CloudFront invalidation:
+
+```bash
+export FE_BUCKET=...          # your bucket name from 6b
+export DIST_ID=...            # see below
+aws iam put-user-policy --user-name "$DEPLOY_IAM_USER" \
+  --policy-name GitHubActionsFrontendDeploy \
+  --policy-document "$(cat <<EOF
+{
+  "Version": "2012-10-17",
+  "Statement": [
+    {"Effect":"Allow","Action":["s3:PutObject","s3:DeleteObject","s3:ListBucket"],
+     "Resource":["arn:aws:s3:::$FE_BUCKET","arn:aws:s3:::$FE_BUCKET/*"]},
+    {"Effect":"Allow","Action":"cloudfront:CreateInvalidation",
+     "Resource":"arn:aws:cloudfront::${AWS_ACCOUNT_ID}:distribution/$DIST_ID"}
+  ]
+}
+EOF
+)"
+```
+
+**Find the CloudFront distribution ID** (it's not the `d…cloudfront.net` domain — it's the `E…` ID):
+
+```bash
+aws cloudfront list-distributions \
+  --query "DistributionList.Items[?DomainName=='<your-dist>.cloudfront.net'].Id" --output text
+```
+
+**Add two GitHub repo secrets:** `FRONTEND_S3_BUCKET` (the bucket name) and `CLOUDFRONT_DISTRIBUTION_ID` (the `E…` ID). If either is unset, the workflow skips with a warning rather than failing.
 
 ---
 
@@ -607,7 +691,7 @@ Set on **both** the Express Mode service (via `--primary-container '...environme
 | `OPENAI_API_KEY` | worker (backend uses it for the legacy `/api/analyze`) | If unset, both fall back to Ollama or `MockLLM` — useless in prod. |
 | `MODEL_PROVIDER` | both | `openai` for production. `auto` works but is fragile. |
 | `SEC_USER_AGENT` | worker | Real contact string. SEC rate-limits anonymous traffic. |
-| `POLYGON_API_KEY` | worker | Optional — falls back to synthetic news. |
+| `POLYGON_API_KEY` | **worker + backend** | Worker: real news (else synthetic). Backend: powers `/api/price` (the chart). Both via Secrets Manager `valueFrom`. Without it: synthetic news + empty price charts (no crash). |
 | `ANALYZE_TIMEOUT_SECS` | backend | Default 900. |
 | `WORKER_POLL_SECONDS` | worker | Default 3. |
 | `WORKER_REFRESH_SCAN_SECONDS` | worker | Default 300. |
@@ -621,18 +705,22 @@ Set on **both** the Express Mode service (via `--primary-container '...environme
 ## Smoke test
 
 ```bash
+# Use the opaque Express hostname from Step 4b (NOT a service-name-based URL):
+export BACKEND_URL=fi-xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx.ecs.us-east-2.on.aws
+
 # Backend health
-curl https://finance-agents-backend.ecs.us-east-2.on.aws/api/health
-# → {"status":"ok","model_provider":"openai","model":"gpt-4o", ...}
+curl https://$BACKEND_URL/api/health
+# → {"status":"healthy","message":"Finance Risk Analysis API is running"}
+# (and GET / returns {"status":"ok",...} — the ALB health-check route)
 
 # Tickers list (probably empty on a fresh deploy)
-curl https://finance-agents-backend.ecs.us-east-2.on.aws/api/tickers
+curl https://$BACKEND_URL/api/tickers
 
 # Cache-miss path: request AAPL/short, get 202 + job_id, poll
-curl https://finance-agents-backend.ecs.us-east-2.on.aws/api/snapshot/AAPL/short
+curl https://$BACKEND_URL/api/snapshot/AAPL/short
 # → 202 {"status":"queued","job_id":"<uuid>"}
 sleep 30
-curl https://finance-agents-backend.ecs.us-east-2.on.aws/api/jobs/<uuid>
+curl https://$BACKEND_URL/api/jobs/<uuid>
 # Expect status to flip queued → running → ready within ~3–5 min.
 # If it stays "queued" forever, the worker isn't draining — check
 # the Fargate task's CloudWatch logs.

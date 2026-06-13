@@ -208,6 +208,8 @@ jobs:
       # ECS fetches the values at container start). See AWS_DEPLOYMENT.md Step 3.5.
       DATABASE_URL_SECRET_ARN: ${{ secrets.DATABASE_URL_SECRET_ARN }}
       OPENAI_KEY_SECRET_ARN: ${{ secrets.OPENAI_KEY_SECRET_ARN }}
+      # POLYGON: backend needs it now that /api/price serves from Polygon aggregates.
+      POLYGON_KEY_SECRET_ARN: ${{ secrets.POLYGON_KEY_SECRET_ARN }}
 
     steps:
       - name: Configure AWS credentials
@@ -231,7 +233,7 @@ jobs:
       # this run creates it or updates it — the action's update semantics for env
       # preservation are undocumented, so we re-assert rather than rely on them.
       - name: Deploy backend to ECS Express Mode
-        if: env.ECS_EXEC_ROLE_ARN != '' && env.ECS_INFRA_ROLE_ARN != '' && env.DATABASE_URL_SECRET_ARN != '' && env.OPENAI_KEY_SECRET_ARN != ''
+        if: env.ECS_EXEC_ROLE_ARN != '' && env.ECS_INFRA_ROLE_ARN != '' && env.DATABASE_URL_SECRET_ARN != '' && env.OPENAI_KEY_SECRET_ARN != '' && env.POLYGON_KEY_SECRET_ARN != ''
         uses: aws-actions/amazon-ecs-deploy-express-service@v1
         with:
           service-name: ${{ env.ECS_EXPRESS_SERVICE_NAME }}
@@ -240,15 +242,15 @@ jobs:
           infrastructure-role-arn: ${{ env.ECS_INFRA_ROLE_ARN }}
           container-port: 8000
           environment-variables: '[{"name":"MODEL_PROVIDER","value":"openai"}]'
-          secrets: '[{"name":"DATABASE_URL","valueFrom":"${{ env.DATABASE_URL_SECRET_ARN }}"},{"name":"OPENAI_API_KEY","valueFrom":"${{ env.OPENAI_KEY_SECRET_ARN }}"}]'
+          secrets: '[{"name":"DATABASE_URL","valueFrom":"${{ env.DATABASE_URL_SECRET_ARN }}"},{"name":"OPENAI_API_KEY","valueFrom":"${{ env.OPENAI_KEY_SECRET_ARN }}"},{"name":"POLYGON_API_KEY","valueFrom":"${{ env.POLYGON_KEY_SECRET_ARN }}"}]'
 
       - name: Skip backend deploy (not fully configured)
-        if: env.ECS_EXEC_ROLE_ARN == '' || env.ECS_INFRA_ROLE_ARN == '' || env.DATABASE_URL_SECRET_ARN == '' || env.OPENAI_KEY_SECRET_ARN == ''
+        if: env.ECS_EXEC_ROLE_ARN == '' || env.ECS_INFRA_ROLE_ARN == '' || env.DATABASE_URL_SECRET_ARN == '' || env.OPENAI_KEY_SECRET_ARN == '' || env.POLYGON_KEY_SECRET_ARN == ''
         run: |
           echo "::warning::Backend deploy skipped — one or more required secrets are unset:"
           echo "  ECS_EXEC_ROLE_ARN, ECS_INFRA_ROLE_ARN (AWS_DEPLOYMENT.md Step 4a)"
-          echo "  DATABASE_URL_SECRET_ARN, OPENAI_KEY_SECRET_ARN (AWS_DEPLOYMENT.md Step 3.5)"
-          echo "Add all four as repo secrets, then re-run."
+          echo "  DATABASE_URL_SECRET_ARN, OPENAI_KEY_SECRET_ARN, POLYGON_KEY_SECRET_ARN (AWS_DEPLOYMENT.md Step 3.5)"
+          echo "Add all five as repo secrets, then re-run."
 
       # Worker — Fargate doesn't auto-poll ECR. force-new-deployment makes the
       # service spawn a new task with the freshly-pushed :latest image, then

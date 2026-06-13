@@ -340,19 +340,22 @@ Full deployment guide: **[AWS_DEPLOYMENT.md](AWS_DEPLOYMENT.md)** · architectur
 | Postgres + pgvector (snapshots, jobs, filings) | Supabase (free tier) or RDS `t4g.micro` |
 | React frontend | S3 + CloudFront |
 
-**Deploys are CI-driven.** [`.github/workflows/build-and-push.yml`](.github/workflows/build-and-push.yml) runs `build → smoke-test → deploy` on every push to `main`: it builds both images, pushes to ECR, smoke-tests them against a throwaway Postgres, then creates/updates the Express service. The worker is redeployed in the same job.
+**Deploys are CI-driven**, split into two workflows by what changed:
+- [`.github/workflows/build-and-push.yml`](.github/workflows/build-and-push.yml) — on push touching `backend/**`, `src/**`, or the Dockerfiles: `build → smoke-test → deploy`. Builds both images, pushes to ECR, smoke-tests against a throwaway Postgres, then creates/updates the Express service. The worker is redeployed in the same job.
+- [`.github/workflows/deploy-frontend.yml`](.github/workflows/deploy-frontend.yml) — on push touching `frontend/**`: `npm build → s3 sync → CloudFront invalidation`. Separate so a UI tweak doesn't trigger an 8-minute backend Docker build.
 
 **One-time manual setup** (the parts CI can't or shouldn't do for you — full commands in [AWS_DEPLOYMENT.md](AWS_DEPLOYMENT.md)):
 
 1. **Database** — create the Supabase project, enable the `vector` extension, grab `DATABASE_URL` (Step 1).
 2. **ECR repos** — `aws ecr create-repository` for `finance-agents-backend` and `finance-agents-worker` (Step 2).
-3. **Secrets Manager** — store `DATABASE_URL` + `OPENAI_API_KEY`; grant the execution role `GetSecretValue` (Step 3.5).
+3. **Secrets Manager** — store `DATABASE_URL`, `OPENAI_API_KEY`, `POLYGON_API_KEY`; grant the execution role `GetSecretValue` (Step 3.5).
 4. **Deploy IAM user** — attach ECR + ECS Express + `iam:PassRole` permissions to the user whose keys are in GitHub (Step 3.6a). *(This is the `ecs:DescribeServices ... not authorized` fix.)*
 5. **Service-linked roles** — `create-service-linked-role` for ECS, ELB, and app-autoscaling, once per fresh account (Step 3.6b). *(This is the `Unable to assume the service linked role` fix.)*
 6. **IAM roles** — `ecsTaskExecutionRole` + `ecsInfrastructureRoleForExpressServices` (Step 4a).
-7. **GitHub repo secrets** — `AWS_ACCESS_KEY_ID`, `AWS_SECRET_ACCESS_KEY`, `ECS_EXEC_ROLE_ARN`, `ECS_INFRA_ROLE_ARN`, `DATABASE_URL_SECRET_ARN`, `OPENAI_KEY_SECRET_ARN` (Step 4b).
+7. **GitHub repo secrets (backend/worker)** — `AWS_ACCESS_KEY_ID`, `AWS_SECRET_ACCESS_KEY`, `ECS_EXEC_ROLE_ARN`, `ECS_INFRA_ROLE_ARN`, `DATABASE_URL_SECRET_ARN`, `OPENAI_KEY_SECRET_ARN`, `POLYGON_KEY_SECRET_ARN` (Step 4b).
+8. **Frontend** — deploy once manually (S3 bucket + CloudFront with the two-origins setup, Step 6a–6c); add S3 + `cloudfront:CreateInvalidation` perms to the deploy user; add repo secrets `FRONTEND_S3_BUCKET` + `CLOUDFRONT_DISTRIBUTION_ID` (Step 6d). After that, `frontend/**` pushes auto-deploy.
 
-Once 1–7 are done, every push to `main` deploys. The `.env` file is local-dev only — it is **not** shipped to AWS; runtime config is injected via the ECS task definition and Secrets Manager.
+Once these are done, every push to `main` deploys (backend/worker via one workflow, frontend via the other). The `.env` file is local-dev only — it is **not** shipped to AWS; runtime config is injected via the ECS task definition and Secrets Manager.
 
 ## 📚 Additional Documentation
 

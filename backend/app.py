@@ -205,40 +205,47 @@ def _cached_overview():
     return list_latest_snapshots_overview()
 
 
-# yfinance is NOT thread-safe: concurrent yf.download() calls clobber each other
-# through shared global state, so three simultaneous (ticker, period) fetches all
-# return whichever period won the race — which made every horizon's sparkline
-# identical on the overview table. We serialize every download behind this lock
-# AND fetch each ticker's full 2y series exactly once, slicing it for the shorter
-# windows. That removes the race entirely, guarantees the three horizons are
-# consistent slices of the same data, and cuts the N×3 fanout to N.
-_yf_lock = Lock()
-
-# Trading-day windows roughly matching yfinance's 1mo / 6mo / 2y row counts.
+# Price history comes from Polygon aggregates (plain HTTP via requests), NOT
+# yfinance. yfinance pulls in curl_cffi, a native extension that crashes the
+# backend container on python:slim images (the ALB then serves 502), and Yahoo
+# IP-blocks AWS datacenter ranges regardless. We fetch each ticker's full ~2y
+# daily series once (cached 15 min) and slice it for the shorter windows, so the
+# three horizons are consistent slices of one fetch and the overview table's N×3
+# fanout collapses to N Polygon calls.
 _PERIOD_TAIL = {"1mo": 22, "6mo": 124, "2y": None}  # None = full series
 
 
 @cached(cache=_price_cache, lock=_cache_lock)
 def _cached_price_full(ticker: str):
-    """Full 2y daily close series for `ticker`, fetched once and cached. Returns
-    list of {date: 'YYYY-MM-DD', close: float}; empty list on data failure.
-    Serialized behind _yf_lock because yfinance is not thread-safe."""
+    """Full ~2y daily close series for `ticker` from Polygon aggregates. Returns
+    list of {date: 'YYYY-MM-DD', close: float}; empty list on any failure or
+    missing key — the caller renders an empty chart, never a 500/crash."""
     import math
-    import yfinance as yf  # lazy import — keeps cold-start of the backend fast
+    from datetime import datetime, date, timedelta, timezone
+
+    api_key = os.getenv("POLYGON_API_KEY")
+    if not api_key:
+        print("⚠️  /api/price: POLYGON_API_KEY not set — returning empty series")
+        return []
+
+    today = date.today()
+    start = today - timedelta(days=365 * 2 + 7)
+    url = (f"https://api.polygon.io/v2/aggs/ticker/{ticker.upper()}"
+           f"/range/1/day/{start.isoformat()}/{today.isoformat()}")
     try:
-        with _yf_lock:
-            df = yf.download(ticker, period="2y", interval="1d",
-                             auto_adjust=False, progress=False)
-        if df is None or df.empty:
+        resp = requests.get(
+            url,
+            params={"adjusted": "true", "sort": "asc", "limit": 50000, "apiKey": api_key},
+            timeout=10,
+        )
+        if resp.status_code != 200:
+            print(f"⚠️  /api/price: Polygon {resp.status_code} for {ticker}: {resp.text[:200]}")
             return []
-        df = df.reset_index()
-        # yfinance may return a MultiIndex (single ticker still); flatten if so.
-        if hasattr(df.columns, "nlevels") and df.columns.nlevels > 1:
-            df.columns = [c[0] if c[1] in ("", ticker) else c[0] for c in df.columns]
+        results = (resp.json() or {}).get("results") or []
         rows = []
-        for _, r in df.iterrows():
-            close = r.get("Close")
-            if close is None:
+        for bar in results:
+            close, ts = bar.get("c"), bar.get("t")
+            if close is None or ts is None:
                 continue
             try:
                 close = float(close)
@@ -246,10 +253,8 @@ def _cached_price_full(ticker: str):
                 continue
             if not math.isfinite(close):
                 continue
-            date_val = r.get("Date")
-            strftime = getattr(date_val, "strftime", None)
-            date_str = strftime("%Y-%m-%d") if strftime else str(date_val)[:10]
-            rows.append({"date": date_str, "close": close})
+            d = datetime.fromtimestamp(ts / 1000.0, tz=timezone.utc).date()
+            rows.append({"date": d.isoformat(), "close": close})
         return rows
     except Exception as e:  # noqa: BLE001
         print(f"⚠️  /api/price fetch failed for {ticker}: {e}")

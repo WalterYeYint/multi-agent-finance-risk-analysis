@@ -1,0 +1,95 @@
+name: deploy-frontend
+
+# Builds the React app and publishes it to S3 + CloudFront.
+# Separate from build-and-push.yml (which builds the backend/worker Docker
+# images) so a frontend change doesn't trigger an 8-minute Docker build + ECS
+# deploy, and a backend change doesn't re-sync the frontend.
+#
+# Triggers: push to main touching frontend/**, or manual dispatch.
+#
+# Prerequisites (one-time):
+#   - Frontend already deployed once manually (S3 bucket + CloudFront dist exist) — AWS_DEPLOYMENT.md Step 6
+#   - Deploy IAM user has S3 write + cloudfront:CreateInvalidation — AWS_DEPLOYMENT.md Step 6 (CI)
+#   - Repo secrets: FRONTEND_S3_BUCKET, CLOUDFRONT_DISTRIBUTION_ID
+#     (plus AWS_ACCESS_KEY_ID / AWS_SECRET_ACCESS_KEY, already set)
+
+on:
+  workflow_dispatch:
+  push:
+    branches: [main]
+    paths:
+      - 'frontend/**'
+      - '.github/workflows/deploy-frontend.yml'
+
+permissions:
+  contents: read
+
+concurrency:
+  group: deploy-frontend-${{ github.ref }}
+  cancel-in-progress: true
+
+env:
+  AWS_REGION: us-east-2
+
+jobs:
+  deploy:
+    runs-on: ubuntu-latest
+    env:
+      FRONTEND_S3_BUCKET: ${{ secrets.FRONTEND_S3_BUCKET }}
+      CLOUDFRONT_DISTRIBUTION_ID: ${{ secrets.CLOUDFRONT_DISTRIBUTION_ID }}
+    steps:
+      - name: Skip if not configured
+        id: guard
+        if: env.FRONTEND_S3_BUCKET == '' || env.CLOUDFRONT_DISTRIBUTION_ID == ''
+        run: |
+          echo "::warning::Frontend deploy skipped — FRONTEND_S3_BUCKET / CLOUDFRONT_DISTRIBUTION_ID not set."
+          echo "Deploy the frontend once manually (AWS_DEPLOYMENT.md Step 6), then add both as repo secrets."
+          echo "skip=true" >> "$GITHUB_OUTPUT"
+
+      - name: Checkout
+        if: steps.guard.outputs.skip != 'true'
+        uses: actions/checkout@v4
+
+      - name: Set up Node
+        if: steps.guard.outputs.skip != 'true'
+        uses: actions/setup-node@v4
+        with:
+          node-version: '20'
+          cache: npm
+          cache-dependency-path: frontend/package-lock.json
+
+      - name: Install + build
+        if: steps.guard.outputs.skip != 'true'
+        working-directory: frontend
+        run: |
+          npm ci
+          npm run build
+
+      - name: Configure AWS credentials
+        if: steps.guard.outputs.skip != 'true'
+        uses: aws-actions/configure-aws-credentials@v4
+        with:
+          aws-access-key-id: ${{ secrets.AWS_ACCESS_KEY_ID }}
+          aws-secret-access-key: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
+          aws-region: ${{ env.AWS_REGION }}
+
+      - name: Sync to S3
+        if: steps.guard.outputs.skip != 'true'
+        run: |
+          # Fingerprinted assets (static/*) are immutable — cache them hard.
+          aws s3 sync frontend/build/ "s3://$FRONTEND_S3_BUCKET" --delete \
+            --cache-control "public, max-age=31536000, immutable" \
+            --exclude index.html
+          # index.html must never be cached, or browsers keep loading the old
+          # bundle after a deploy.
+          aws s3 cp frontend/build/index.html "s3://$FRONTEND_S3_BUCKET/index.html" \
+            --cache-control "no-cache, no-store, must-revalidate" \
+            --content-type "text/html"
+
+      - name: Invalidate CloudFront
+        if: steps.guard.outputs.skip != 'true'
+        run: |
+          ID=$(aws cloudfront create-invalidation \
+            --distribution-id "$CLOUDFRONT_DISTRIBUTION_ID" \
+            --paths "/*" --query 'Invalidation.Id' --output text)
+          echo "✓ CloudFront invalidation created: $ID"
