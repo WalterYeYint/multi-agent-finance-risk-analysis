@@ -1,11 +1,11 @@
 import React, { useState } from 'react';
 import { useNavigate } from 'react-router-dom';
 import { Search } from 'lucide-react';
-import { useTickers } from '../hooks/useTickers';
-import TickerCard from '../components/TickerCard';
+import { useOverview } from '../hooks/useOverview';
+import OverviewTable from '../components/OverviewTable';
 
 function Landing() {
-  const { tickers, loading, error } = useTickers();
+  const { tickers, loading, error } = useOverview();
   const [query, setQuery] = useState('');
   const navigate = useNavigate();
 
@@ -47,13 +47,7 @@ function Landing() {
         </div>
       )}
 
-      {tickers.length > 0 && (
-        <div className="ticker-grid">
-          {tickers.map((t) => (
-            <TickerCard key={t.ticker} ticker={t} />
-          ))}
-        </div>
-      )}
+      {tickers.length > 0 && <OverviewTable tickers={tickers} />}
     </div>
   );
 }

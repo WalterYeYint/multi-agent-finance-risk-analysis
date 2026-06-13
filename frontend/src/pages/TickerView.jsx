@@ -1,11 +1,12 @@
 import React, { useMemo } from 'react';
 import { Link, useParams, useSearchParams } from 'react-router-dom';
 import { ChevronLeft } from 'lucide-react';
-import HorizonTabs from '../components/HorizonTabs';
+import HorizonSummaryStrip from '../components/HorizonSummaryStrip';
+import PriceChart from '../components/PriceChart';
 import HistoryStrip from '../components/HistoryStrip';
 import SnapshotView from '../components/SnapshotView';
 import PendingView from '../components/PendingView';
-import { useSnapshot } from '../hooks/useSnapshot';
+import { useAllSnapshots } from '../hooks/useAllSnapshots';
 
 const HORIZONS = ['SHORT', 'MID', 'LONG'];
 
@@ -18,7 +19,10 @@ function TickerView() {
   }, [searchParams]);
 
   const upperTicker = (ticker || '').toUpperCase();
-  const { snapshot, pending, error, loading } = useSnapshot(upperTicker, horizon);
+  // Eager: fan out to all three horizons at once. The user sees a ready horizon
+  // immediately even while the other two are still being computed.
+  const { byHorizon } = useAllSnapshots(upperTicker);
+  const active = byHorizon[horizon];
 
   const setHorizon = (h) => {
     const next = new URLSearchParams(searchParams);
@@ -35,15 +39,25 @@ function TickerView() {
         <h1 className="ticker-view__symbol">{upperTicker}</h1>
       </div>
 
-      <HorizonTabs horizons={HORIZONS} active={horizon} onChange={setHorizon} />
+      <HorizonSummaryStrip
+        byHorizon={byHorizon}
+        active={horizon}
+        onSelect={setHorizon}
+      />
+
+      <PriceChart ticker={upperTicker} horizon={horizon} />
 
       <HistoryStrip ticker={upperTicker} horizon={horizon} days={90} />
 
       <div className="ticker-view__body">
-        {error && <div className="snapshot__error">Could not load snapshot: {error}</div>}
-        {!error && loading && !snapshot && !pending && <div className="landing__muted">Loading…</div>}
-        {!error && pending && <PendingView pending={pending} />}
-        {!error && snapshot && <SnapshotView snapshot={snapshot} />}
+        {active.status === 'error' && (
+          <div className="snapshot__error">Could not load snapshot: {active.error}</div>
+        )}
+        {active.status === 'loading' && (
+          <div className="landing__muted">Loading {horizon} snapshot…</div>
+        )}
+        {active.status === 'pending' && <PendingView pending={active.pending} />}
+        {active.status === 'ready' && <SnapshotView snapshot={active.snapshot} />}
       </div>
     </div>
   );

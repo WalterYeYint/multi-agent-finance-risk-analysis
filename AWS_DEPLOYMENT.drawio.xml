@@ -1,0 +1,135 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<mxfile host="app.diagrams.net" agent="exported from AWS_DEPLOYMENT.md" version="24.0.0" type="device">
+  <diagram name="AWS Deployment" id="aws-deployment">
+    <mxGraphModel dx="1500" dy="900" grid="1" gridSize="10" guides="1" tooltips="1" connect="1" arrows="1" fold="1" page="1" pageScale="1" pageWidth="1400" pageHeight="950" math="0" shadow="0">
+      <root>
+        <mxCell id="0" />
+        <mxCell id="1" parent="0" />
+
+        <!-- ====== Title ====== -->
+        <mxCell id="title" value="Multi-Agent Finance Risk Analysis &#8212; AWS Deployment (Option B-lite-lite)" style="text;html=1;align=center;verticalAlign=middle;fontSize=18;fontStyle=1;fontColor=#232F3E;" vertex="1" parent="1">
+          <mxGeometry x="200" y="20" width="1000" height="32" as="geometry" />
+        </mxCell>
+        <mxCell id="subtitle" value="Backend on ECS Express Mode &#8226; Worker on Fargate &#8226; DB on Supabase or RDS &#8226; Frontend on S3+CloudFront &#8226; ~$41/mo idle (lean)" style="text;html=1;align=center;verticalAlign=middle;fontSize=12;fontColor=#545B64;" vertex="1" parent="1">
+          <mxGeometry x="200" y="52" width="1000" height="20" as="geometry" />
+        </mxCell>
+
+        <!-- ====== Group: AWS account ====== -->
+        <mxCell id="aws-account" value="AWS account" style="rounded=0;whiteSpace=wrap;html=1;fillColor=#F8F8FA;strokeColor=#232F3E;dashed=1;strokeWidth=1;verticalAlign=top;align=left;fontStyle=1;fontColor=#232F3E;fontSize=12;spacingLeft=10;spacingTop=8;" vertex="1" parent="1">
+          <mxGeometry x="60" y="100" width="940" height="700" as="geometry" />
+        </mxCell>
+
+        <!-- ====== Group: External services ====== -->
+        <mxCell id="external-group" value="External (outbound HTTPS only)" style="rounded=0;whiteSpace=wrap;html=1;fillColor=#FCFAF2;strokeColor=#8B6914;dashed=1;strokeWidth=1;verticalAlign=top;align=left;fontStyle=1;fontColor=#8B6914;fontSize=12;spacingLeft=10;spacingTop=8;" vertex="1" parent="1">
+          <mxGeometry x="1040" y="500" width="320" height="300" as="geometry" />
+        </mxCell>
+
+        <!-- ====== User ====== -->
+        <mxCell id="user" value="Browser&#10;(any visitor)" style="shape=umlActor;verticalLabelPosition=bottom;verticalAlign=top;html=1;fillColor=#dae8fc;strokeColor=#6c8ebf;fontSize=12;" vertex="1" parent="1">
+          <mxGeometry x="620" y="120" width="40" height="60" as="geometry" />
+        </mxCell>
+
+        <!-- ====== CloudFront ====== -->
+        <mxCell id="cloudfront" value="CloudFront&#10;(CDN + auto HTTPS)" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#8C4FFF;strokeColor=#5C2D9D;fontColor=#FFFFFF;fontSize=12;fontStyle=1;arcSize=20;" vertex="1" parent="1">
+          <mxGeometry x="555" y="220" width="170" height="60" as="geometry" />
+        </mxCell>
+
+        <!-- ====== S3 Frontend ====== -->
+        <mxCell id="s3-frontend" value="S3 &#8212; frontend&#10;React build (HTML/JS/CSS)" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#7AA116;strokeColor=#43680F;fontColor=#FFFFFF;fontSize=12;fontStyle=1;arcSize=20;" vertex="1" parent="1">
+          <mxGeometry x="180" y="340" width="200" height="70" as="geometry" />
+        </mxCell>
+
+        <!-- ====== ECS Express Mode (backend) ====== -->
+        <mxCell id="ecs-express" value="ECS Express Mode &#8212; backend&#10;&#10;&#8226; Auto-provisioned ALB + HTTPS URL&#10;&#8226; *.ecs.us-east-2.on.aws&#10;&#8226; Fargate, 0.5&#8211;1 vCPU / 1&#8211;2 GB&#10;&#8226; Reads or enqueues only &#8212; no LLM here&#10;&#10;~$36&#8211;52/mo (lean / default)" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#ED7100;strokeColor=#8C4400;fontColor=#FFFFFF;fontSize=11;fontStyle=0;arcSize=12;align=left;spacingLeft=10;verticalAlign=top;spacingTop=8;" vertex="1" parent="1">
+          <mxGeometry x="555" y="340" width="280" height="170" as="geometry" />
+        </mxCell>
+
+        <!-- ====== Database ====== -->
+        <mxCell id="db" value="Postgres + pgvector&#10;&#10;Supabase Free  OR  RDS t4g.micro&#10;&#10;Tables:&#10;&#8226; snapshots (append-only, doubles as history)&#10;&#8226; jobs (queued / running / ready / failed)&#10;&#8226; filings + filing_chunks (RAG store)&#10;&#10;~$0 (Supabase Free)  /  ~$14/mo (RDS)" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#3334B9;strokeColor=#191A66;fontColor=#FFFFFF;fontSize=11;arcSize=12;align=left;spacingLeft=10;verticalAlign=top;spacingTop=8;" vertex="1" parent="1">
+          <mxGeometry x="555" y="570" width="320" height="200" as="geometry" />
+        </mxCell>
+
+        <!-- ====== ECS Fargate Worker ====== -->
+        <mxCell id="worker" value="ECS Fargate &#8212; worker&#10;python -m src.worker&#10;&#10;&#8226; claim_next_job (FOR UPDATE SKIP LOCKED)&#10;&#8226; runs chain + debate pipeline&#10;&#8226; writes snapshot &amp; job status&#10;&#8226; periodic stale-refresh scan (every 5 min)&#10;&#10;~$3/mo (Spot) / ~$9/mo (standard)" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#ED7100;strokeColor=#8C4400;fontColor=#FFFFFF;fontSize=11;arcSize=12;align=left;spacingLeft=10;verticalAlign=top;spacingTop=8;" vertex="1" parent="1">
+          <mxGeometry x="120" y="570" width="320" height="200" as="geometry" />
+        </mxCell>
+
+        <!-- ====== External services ====== -->
+        <mxCell id="ext-openai" value="OpenAI&#10;(LLM &#8212; agents)" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#FFFFFF;strokeColor=#8B6914;fontColor=#232F3E;fontSize=11;arcSize=20;" vertex="1" parent="1">
+          <mxGeometry x="1080" y="540" width="240" height="60" as="geometry" />
+        </mxCell>
+        <mxCell id="ext-polygon" value="Polygon.io&#10;(news, optional)" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#FFFFFF;strokeColor=#8B6914;fontColor=#232F3E;fontSize=11;arcSize=20;" vertex="1" parent="1">
+          <mxGeometry x="1080" y="620" width="240" height="60" as="geometry" />
+        </mxCell>
+        <mxCell id="ext-edgar" value="SEC EDGAR&#10;(10-K / 10-Q filings)" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#FFFFFF;strokeColor=#8B6914;fontColor=#232F3E;fontSize=11;arcSize=20;" vertex="1" parent="1">
+          <mxGeometry x="1080" y="700" width="240" height="60" as="geometry" />
+        </mxCell>
+
+        <!-- ====== Edges ====== -->
+
+        <!-- Browser -> CloudFront -->
+        <mxCell id="e-user-cf" value="HTTPS" style="endArrow=classic;html=1;rounded=0;strokeColor=#232F3E;fontSize=10;labelBackgroundColor=#FFFFFF;" edge="1" parent="1" source="user" target="cloudfront">
+          <mxGeometry relative="1" as="geometry" />
+        </mxCell>
+
+        <!-- CloudFront -> S3 (static) -->
+        <mxCell id="e-cf-s3" value="static assets" style="endArrow=classic;html=1;rounded=0;strokeColor=#232F3E;fontSize=10;labelBackgroundColor=#FFFFFF;" edge="1" parent="1" source="cloudfront" target="s3-frontend">
+          <mxGeometry relative="1" as="geometry" />
+        </mxCell>
+
+        <!-- CloudFront -> ECS Express (API) -->
+        <mxCell id="e-cf-ecs" value="/api/* &#10;(read or enqueue)" style="endArrow=classic;html=1;rounded=0;strokeColor=#232F3E;fontSize=10;labelBackgroundColor=#FFFFFF;" edge="1" parent="1" source="cloudfront" target="ecs-express">
+          <mxGeometry relative="1" as="geometry" />
+        </mxCell>
+
+        <!-- ECS Express -> DB -->
+        <mxCell id="e-ecs-db" value="SELECT snapshot&#10;INSERT job" style="endArrow=classic;html=1;rounded=0;strokeColor=#3334B9;fontSize=10;labelBackgroundColor=#FFFFFF;" edge="1" parent="1" source="ecs-express" target="db">
+          <mxGeometry relative="1" as="geometry" />
+        </mxCell>
+
+        <!-- Worker -> DB (claim) -->
+        <mxCell id="e-worker-db-claim" value="claim_next_job" style="endArrow=classic;html=1;rounded=0;strokeColor=#3334B9;fontSize=10;labelBackgroundColor=#FFFFFF;exitX=1;exitY=0.33;exitDx=0;exitDy=0;entryX=0;entryY=0.33;entryDx=0;entryDy=0;" edge="1" parent="1" source="worker" target="db">
+          <mxGeometry relative="1" as="geometry" />
+        </mxCell>
+
+        <!-- Worker -> DB (write snapshot) -->
+        <mxCell id="e-worker-db-write" value="save_snapshot" style="endArrow=classic;html=1;rounded=0;strokeColor=#3334B9;fontSize=10;labelBackgroundColor=#FFFFFF;exitX=1;exitY=0.66;exitDx=0;exitDy=0;entryX=0;entryY=0.66;entryDx=0;entryDy=0;" edge="1" parent="1" source="worker" target="db">
+          <mxGeometry relative="1" as="geometry" />
+        </mxCell>
+
+        <!-- Worker -> External services (dashed = optional / per call) -->
+        <mxCell id="e-worker-openai" value="chat completion" style="endArrow=classic;html=1;rounded=0;strokeColor=#8B6914;dashed=1;fontSize=10;labelBackgroundColor=#FFFFFF;" edge="1" parent="1" source="worker" target="ext-openai">
+          <mxGeometry relative="1" as="geometry" />
+        </mxCell>
+        <mxCell id="e-worker-polygon" value="news" style="endArrow=classic;html=1;rounded=0;strokeColor=#8B6914;dashed=1;fontSize=10;labelBackgroundColor=#FFFFFF;" edge="1" parent="1" source="worker" target="ext-polygon">
+          <mxGeometry relative="1" as="geometry" />
+        </mxCell>
+        <mxCell id="e-worker-edgar" value="filings ingest" style="endArrow=classic;html=1;rounded=0;strokeColor=#8B6914;dashed=1;fontSize=10;labelBackgroundColor=#FFFFFF;" edge="1" parent="1" source="worker" target="ext-edgar">
+          <mxGeometry relative="1" as="geometry" />
+        </mxCell>
+
+        <!-- ECS Express -> yfinance for price chart -->
+        <mxCell id="e-ecs-yfinance" value="yfinance&#10;(/api/price)" style="endArrow=classic;html=1;rounded=0;strokeColor=#8B6914;dashed=1;fontSize=10;labelBackgroundColor=#FFFFFF;exitX=1;exitY=0.5;exitDx=0;exitDy=0;entryX=0;entryY=0.5;entryDx=0;entryDy=0;" edge="1" parent="1" source="ecs-express" target="ext-polygon">
+          <mxGeometry relative="1" as="geometry" />
+        </mxCell>
+
+        <!-- ====== Legend ====== -->
+        <mxCell id="legend" value="Legend" style="text;html=1;align=center;verticalAlign=middle;fontSize=12;fontStyle=1;fontColor=#232F3E;" vertex="1" parent="1">
+          <mxGeometry x="60" y="830" width="80" height="20" as="geometry" />
+        </mxCell>
+        <mxCell id="legend-edge" value="Solid arrow = in-account/data plane &#8226; Dashed arrow = outbound HTTPS to 3rd party &#8226; Blue arrow = Postgres traffic" style="text;html=1;align=left;verticalAlign=middle;fontSize=11;fontColor=#545B64;" vertex="1" parent="1">
+          <mxGeometry x="140" y="830" width="800" height="20" as="geometry" />
+        </mxCell>
+        <mxCell id="legend-colors" value="Purple = edge (CloudFront) &#8226; Green = static (S3) &#8226; Orange = compute (ECS) &#8226; Blue = data (Postgres)" style="text;html=1;align=left;verticalAlign=middle;fontSize=11;fontColor=#545B64;" vertex="1" parent="1">
+          <mxGeometry x="140" y="850" width="800" height="20" as="geometry" />
+        </mxCell>
+
+        <!-- ====== Note: dedup ====== -->
+        <mxCell id="note-dedup" value="Job dedup: a partial unique index `jobs_pending_uniq` ensures at most one in-flight job per (ticker, horizon).&#10;Concurrent users requesting the same ticker attach to the same job_id; the worker runs the pipeline once." style="rounded=0;whiteSpace=wrap;html=1;fillColor=#FFF7E6;strokeColor=#D9822B;strokeWidth=1;fontSize=10;fontColor=#7A4400;align=left;spacingLeft=8;spacingTop=6;" vertex="1" parent="1">
+          <mxGeometry x="180" y="430" width="360" height="60" as="geometry" />
+        </mxCell>
+
+      </root>
+    </mxGraphModel>
+  </diagram>
+</mxfile>

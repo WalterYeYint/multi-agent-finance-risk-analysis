@@ -1,6 +1,6 @@
 # AWS Deployment Guide — Option B-lite-lite
 
-> **TL;DR.** Keep the Flask backend on App Runner, run the worker on Fargate, store snapshots/filings in a single `t4g.micro` RDS Postgres (pgvector), serve the frontend from S3 + CloudFront. **~$28–38/mo idle**, with no Lambda port required.
+> **TL;DR.** Run the Flask backend on **ECS Express Mode** (Fargate-backed; managed ALB + HTTPS URL), the worker on plain ECS Fargate, store snapshots/filings in Supabase (free) or a `t4g.micro` RDS Postgres (pgvector), serve the frontend from S3 + CloudFront. **~$41/mo idle (lean)** to ~$77/mo (default-sized + RDS), no Lambda port required.
 
 This guide reflects the **current** code shape (post-`21216cc1`): a backend that only **reads or enqueues**, a **worker** that drains the queue and runs the chain + debate pipeline, and a Postgres + pgvector database that both processes share. The previous version of this file only deployed the backend container — it predates the worker and database, and was not actually runnable end-to-end.
 
@@ -13,11 +13,13 @@ For a comparison with the higher-ceiling "Option B-lite" (Lambda + Aurora + Dyna
 ```
                   CloudFront
                        │
-        ┌──────────────┼──────────────┐
-        │              │              │
-   S3: frontend   App Runner     ── (no auth, no API Gateway)
-                  Flask backend       
-                       │              
+        ┌──────────────┼─────────────────┐
+        │              │                 │
+   S3: frontend   ECS Express Mode    ── (no auth, no API Gateway)
+                  (Fargate + auto-ALB
+                   + auto-URL .ecs.<region>.on.aws)
+                       │
+                       │
                        │              ┌─────────────────────────────┐
                        └────POSTGRES──┤  Supabase  OR  RDS t4g.micro│
                                       │  (Postgres + pgvector)      │
@@ -44,7 +46,9 @@ Two containers built from the same source tree (`Dockerfile.backend`, `Dockerfil
 
 ---
 
-## What's different from the old single-container plan
+## What's different from the previous versions of this guide
+
+> Earlier revisions of this guide had the backend on **AWS App Runner**. App Runner stopped accepting new customers on 30 Apr 2026 — we're now on **ECS Express Mode**, AWS's named successor. The two have similar shapes (give it a container image, get a managed URL) but Express Mode is Fargate underneath with an auto-provisioned ALB, so the idle cost is meaningfully higher (no "pause when idle" billing).
 
 | Concern | Old plan | This plan |
 |---|---|---|
@@ -115,7 +119,7 @@ The pipeline needs Postgres 14+ with `pgvector`. Two paths, picked on cost / ops
 
 6. **(Free tier only.)** Supabase pauses projects after 7 days of inactivity. The worker's 3-second poll loop counts as activity, so as long as the Fargate task is running you never sleep. If you `desired-count=0` the worker for a week, expect a one-time ~30 s cold start on the next request.
 
-That's it for Option A — skip ahead to [Step 2](#step-2--container-registry-two-ecr-repos). The App Runner VPC connector (Step 4) and the in-VPC ingress rules in Step 5 become **unnecessary** with Supabase, because both containers reach the DB over the public internet via TLS.
+That's it for Option A — skip ahead to [Step 2](#step-2--container-registry-two-ecr-repos). The custom VPC config in Step 4 (Express Mode) and the in-VPC ingress rules in Step 5 (worker) become **unnecessary** with Supabase, because both containers reach the DB over the public internet via TLS.
 
 ### Option B — RDS Postgres + pgvector (in your VPC)
 
@@ -165,7 +169,7 @@ echo "$DATABASE_URL"
 psql "$DATABASE_URL" -c "CREATE EXTENSION IF NOT EXISTS vector;"
 ```
 
-> **Production hardening (not in this minimal path):** store the password in AWS Secrets Manager and reference it from the App Runner / Fargate env config; rotate; enable storage encryption; turn on Performance Insights.
+> **Production hardening (not in this minimal path):** store the password in AWS Secrets Manager and reference it from the Express Mode / Fargate env config; rotate; enable storage encryption; turn on Performance Insights.
 
 ---
 
@@ -193,30 +197,114 @@ docker buildx build --platform linux/amd64 -f Dockerfile.worker \
 
 ---
 
-## Step 4 — Backend (App Runner)
+## Step 4 — Backend (ECS Express Mode)
 
-Create from the ECR image. Console flow:
+> **Why not App Runner?** AWS announced on 30 Apr 2026 that App Runner stopped accepting new customers, and the recommended replacement is **Amazon ECS Express Mode** (launched 21 Nov 2025). Express Mode is the spiritual successor: provide a container image and two IAM roles, and ECS provisions a Fargate service + Application Load Balancer + auto-scaling + a `*.ecs.<region>.on.aws` HTTPS URL with a single API call. No extra charge for Express Mode itself — you pay only for the Fargate compute + ALB underneath.
 
-1. **App Runner → Create service**
-2. **Source:** Container registry → Amazon ECR → pick `$PROJECT-backend:latest`
-3. **Deployment trigger:** Automatic (App Runner re-deploys on `latest` push)
-4. **Service settings:**
-   - CPU / Memory: **1 vCPU / 2 GB**
-   - Port: **8000**
-   - Health check: HTTP `GET /api/health` (every 20s)
-   - Auto-scaling: min 1 / max 1 instance, concurrency 50
-5. **VPC connector:**
-   - **Option A (Supabase):** skip — App Runner's default egress reaches the public Supabase endpoint directly. Faster to provision, no NAT.
-   - **Option B (RDS):** create one bound to the default VPC + the same security group as the DB. *(Required — App Runner needs explicit VPC egress to reach a private-subnet RDS.)*
-6. **Environment variables** (see [full list below](#environment-variables)).
+### 4a — IAM roles (one-time)
 
-App Runner gives you `https://<random>.<region>.awsapprunner.com`. Record it — the frontend needs it.
+Express Mode needs two roles. Both attach AWS-managed policies; no custom policy authoring required.
 
-> **Idle billing.** With min instances = 1 and auto-scaling concurrency tuned, App Runner *pauses provisioned instances* between requests and only charges for memory ($0.007/GB-hour). 2 GB paused = ~$10/mo. Active billing ($0.064/vCPU-hour + $0.007/GB-hour) is per-request.
+```bash
+# Task execution role — lets ECS pull from ECR and write CloudWatch logs
+aws iam create-role --role-name ecsTaskExecutionRole \
+  --assume-role-policy-document '{
+    "Version": "2012-10-17",
+    "Statement": [{
+      "Effect": "Allow",
+      "Principal": {"Service": "ecs-tasks.amazonaws.com"},
+      "Action": "sts:AssumeRole"
+    }]
+  }'
+
+aws iam attach-role-policy --role-name ecsTaskExecutionRole \
+  --policy-arn arn:aws:iam::aws:policy/service-role/AmazonECSTaskExecutionRolePolicy
+
+# Infrastructure role — lets Express Mode provision the ALB + scaling on your behalf
+aws iam create-role --role-name ecsInfrastructureRoleForExpressServices \
+  --assume-role-policy-document '{
+    "Version": "2012-10-17",
+    "Statement": [{
+      "Sid": "AllowAccessInfrastructureForECSExpressServices",
+      "Effect": "Allow",
+      "Principal": {"Service": "ecs.amazonaws.com"},
+      "Action": "sts:AssumeRole"
+    }]
+  }'
+
+aws iam attach-role-policy --role-name ecsInfrastructureRoleForExpressServices \
+  --policy-arn arn:aws:iam::aws:policy/service-role/AmazonECSInfrastructureRoleforExpressGatewayServices
+```
+
+Record both ARNs — the deploy step needs them:
+
+```bash
+export EXEC_ROLE_ARN=$(aws iam get-role --role-name ecsTaskExecutionRole --query 'Role.Arn' --output text)
+export INFRA_ROLE_ARN=$(aws iam get-role --role-name ecsInfrastructureRoleForExpressServices --query 'Role.Arn' --output text)
+```
+
+### 4b — Create the Express service
+
+```bash
+aws ecs create-express-gateway-service \
+  --service-name finance-agents-backend \
+  --execution-role-arn "$EXEC_ROLE_ARN" \
+  --infrastructure-role-arn "$INFRA_ROLE_ARN" \
+  --primary-container '{
+    "image": "'"$AWS_ACCOUNT_ID"'.dkr.ecr.'"$AWS_REGION"'.amazonaws.com/finance-agents-backend:latest",
+    "containerPort": 8000,
+    "environment": [
+      {"name": "DATABASE_URL",         "value": "'"$DATABASE_URL"'"},
+      {"name": "OPENAI_API_KEY",       "value": "sk-..."},
+      {"name": "MODEL_PROVIDER",       "value": "openai"},
+      {"name": "ANALYZE_TIMEOUT_SECS", "value": "900"}
+    ]
+  }' \
+  --cpu 1 \
+  --memory 2 \
+  --health-check-path "/api/health" \
+  --scaling-target '{"minTaskCount":1,"maxTaskCount":3}' \
+  --monitor-resources
+```
+
+`--monitor-resources` streams provisioning status to stdout (ALB, target group, service, etc.) and exits once `ACTIVE`. Total time: ~3–5 min on a fresh region.
+
+The service URL is printed on completion, in the format:
+
+```
+https://finance-agents-backend.ecs.us-east-2.on.aws/
+```
+
+Record it — the frontend's `REACT_APP_API_URL` needs it.
+
+### 4c — Note on networking by DB choice
+
+- **Option A (Supabase):** no extra config — Express Mode's auto-provisioned VPC has outbound internet egress through a managed NAT, which reaches the public Supabase endpoint over TLS.
+- **Option B (RDS):** create the Express service in the same VPC + subnets as the RDS instance, and add the Express Mode service's security group to the RDS security group's ingress on port 5432. The `aws ecs create-express-gateway-service` command takes `--network-configuration` for this; see the [Express Mode docs](https://docs.aws.amazon.com/AmazonECS/latest/developerguide/express-service-overview.html) for the syntax.
+
+### 4d — Cost shape
+
+Express Mode is free; you pay for what it provisions:
+
+| Resource | Default (1 vCPU / 2 GB / 1 task) | Idle cost |
+|---|---|---|
+| Fargate compute | 1 vCPU × $0.04048/hr × 730 + 2 GB × $0.004445/hr × 730 | ~$36/mo |
+| Application Load Balancer | 1 ALB-hour × 730 | ~$16/mo |
+| **Backend total (idle)** | | **~$52/mo** |
+
+Smaller settings cut this meaningfully:
+
+| Profile | CPU / Mem | Backend total idle |
+|---|---|---|
+| Lean (`--cpu 0.5 --memory 1`) | 0.5 vCPU / 1 GB | ~$36/mo |
+| **Default** | 1 vCPU / 2 GB | ~$52/mo |
+| Production-ish (`--cpu 2 --memory 4`) | 2 vCPU / 4 GB | ~$93/mo |
+
+> **ALB consolidation.** AWS automatically packs up to 25 Express Mode services behind a single ALB when possible — so if you eventually run multiple Express services in this account, the $16 ALB cost is amortized across them. For a single-service deploy it's a fixed line item.
 
 ## Step 5 — Worker (ECS Fargate)
 
-The worker polls every 3 s and must run continuously — App Runner's pause-when-idle model is wrong for it. Fargate is.
+The worker polls every 3 s and must run continuously. Unlike the backend, it doesn't expose HTTP — so it doesn't belong on Express Mode. Plain ECS Fargate with `desired-count=1` is the right shape.
 
 ```bash
 # 5a) Create cluster
@@ -281,9 +369,9 @@ aws ecs create-service \
 ## Step 6 — Frontend (S3 + CloudFront)
 
 ```bash
-# 6a) Point the React app at the App Runner URL
+# 6a) Point the React app at the Express Mode URL
 cd frontend
-echo "REACT_APP_API_URL=https://<your-apprunner-url>" > .env.production
+echo "REACT_APP_API_URL=https://finance-agents-backend.ecs.us-east-2.on.aws" > .env.production
 npm run build
 cd ..
 
@@ -303,7 +391,7 @@ aws s3 sync frontend/build/ s3://$FE_BUCKET --delete
 
 ## Environment variables
 
-Set on **both** the App Runner service and the Fargate task definition unless noted.
+Set on **both** the Express Mode service (via `--primary-container '...environment...'` at create time, or `aws ecs update-express-gateway-service` later) and the Fargate worker task definition unless noted.
 
 | Var | Required by | Notes |
 |---|---|---|
@@ -315,7 +403,7 @@ Set on **both** the App Runner service and the Fargate task definition unless no
 | `ANALYZE_TIMEOUT_SECS` | backend | Default 900. |
 | `WORKER_POLL_SECONDS` | worker | Default 3. |
 | `WORKER_REFRESH_SCAN_SECONDS` | worker | Default 300. |
-| `HOST`, `PORT` | backend | Set by Dockerfile.backend; App Runner reads PORT. |
+| `HOST`, `PORT` | backend | Set by Dockerfile.backend; Express Mode reads `containerPort` from the service config (set to 8000). |
 | `LANGCHAIN_TRACING_V2`, `LANGCHAIN_API_KEY`, `LANGCHAIN_PROJECT` | worker (optional) | LangSmith. |
 
 > **Move secrets out of the task definition.** For anything non-demo, replace inline `OPENAI_API_KEY` / `DATABASE_URL` values with `"valueFrom": "<secret-arn>"` and create entries in Secrets Manager. The IAM role just needs `secretsmanager:GetSecretValue`.
@@ -326,17 +414,17 @@ Set on **both** the App Runner service and the Fargate task definition unless no
 
 ```bash
 # Backend health
-curl https://<your-apprunner-url>/api/health
+curl https://finance-agents-backend.ecs.us-east-2.on.aws/api/health
 # → {"status":"ok","model_provider":"openai","model":"gpt-4o", ...}
 
 # Tickers list (probably empty on a fresh deploy)
-curl https://<your-apprunner-url>/api/tickers
+curl https://finance-agents-backend.ecs.us-east-2.on.aws/api/tickers
 
 # Cache-miss path: request AAPL/short, get 202 + job_id, poll
-curl https://<your-apprunner-url>/api/snapshot/AAPL/short
+curl https://finance-agents-backend.ecs.us-east-2.on.aws/api/snapshot/AAPL/short
 # → 202 {"status":"queued","job_id":"<uuid>"}
 sleep 30
-curl https://<your-apprunner-url>/api/jobs/<uuid>
+curl https://finance-agents-backend.ecs.us-east-2.on.aws/api/jobs/<uuid>
 # Expect status to flip queued → running → ready within ~3–5 min.
 # If it stays "queued" forever, the worker isn't draining — check
 # the Fargate task's CloudWatch logs.
@@ -352,8 +440,8 @@ Both estimates are **idle / low-traffic baselines** (no real users, minimal LLM 
 
 | Line item | This plan (B-lite-lite) | Option B-lite (latest_plan.md) |
 |---|---|---|
-| **HTTP serving** | App Runner backend, 1 vCPU / 2 GB, paused: 2 GB × $0.007 × 730h | API Gateway + Lambda: ~few $ |
-|  | ≈ **$10/mo** | ≈ **$3/mo** |
+| **HTTP serving** | ECS Express Mode (Fargate 1 vCPU / 2 GB + auto-ALB) | API Gateway + Lambda: ~few $ |
+|  | ≈ **$52/mo** (lean: ~$36) | ≈ **$3/mo** |
 | **Worker** | Fargate 0.25 vCPU / 1 GB continuous | Fargate 0.5 vCPU / 1 GB continuous |
 |  | ≈ **$9/mo** (or ~$3 on Spot) | ≈ **$18/mo** |
 | **Database — Option A (Supabase Free)** | Hosted Postgres + pgvector, 500 MB | _n/a — B-lite assumes Aurora_ |
@@ -368,18 +456,18 @@ Both estimates are **idle / low-traffic baselines** (no real users, minimal LLM 
 | **Cron / scheduling** | _(worker self-schedules)_ | EventBridge: free tier |
 | **Observability (CloudWatch basic)** | ≈ $1/mo | ≈ $2/mo |
 | **WAF** | _not included_ | ≈ $5/mo + per-request |
-| **NAT egress** | $0 (App Runner uses managed VPC connector; Fargate task has `assignPublicIp=ENABLED`) | depends |
-| **Total idle (Supabase Free + Spot worker)** | **~$15/mo** | _n/a_ |
-| **Total idle (Supabase Free + standard worker)** | **~$21/mo** | _n/a_ |
-| **Total idle (Supabase Pro + standard worker)** | **~$46/mo** | _n/a_ |
-| **Total idle (RDS + standard worker)** | **~$35/mo** | **~$75/mo** |
-| **Total idle (RDS + Spot worker)** | **~$29/mo** | |
+| **NAT egress** | $0 (Express Mode manages its own VPC; Fargate worker has `assignPublicIp=ENABLED`) | depends |
+| **Total idle (Supabase Free + Spot worker + lean Express)** | **~$41/mo** | _n/a_ |
+| **Total idle (Supabase Free + Spot worker + default Express)** | **~$57/mo** | _n/a_ |
+| **Total idle (Supabase Free + standard worker + default Express)** | **~$63/mo** | _n/a_ |
+| **Total idle (Supabase Pro + standard worker + default Express)** | **~$88/mo** | _n/a_ |
+| **Total idle (RDS + standard worker + default Express)** | **~$77/mo** | **~$75/mo** |
 
-**Cheapest viable runnable demo: ~$15/mo** (Supabase Free + Fargate Spot worker + App Runner + S3). That's **~80 % off Option B-lite** and **~57 % off the RDS variant of this plan**. Caveats: 500 MB DB ceiling, no auto-backups on free Supabase, and pause-after-1-week on idle if you also `desired-count=0` the worker.
+**Cheapest viable runnable demo: ~$41/mo** (Supabase Free + Fargate Spot worker + Express Mode lean + S3+CF). That's ~45 % off Option B-lite. The App Runner-paused trick that previously got us to ~$15/mo is gone with App Runner — Express Mode keeps Fargate tasks running, no pause-when-idle. If $41/mo is too much, the architectural levers are: smaller Express CPU (already at 0.5), drop the worker to scheduled-only via EventBridge instead of continuous, or move HTTP off Express to a cheaper container service (Lightsail Containers ~$10/mo, no ALB).
 
 ### When B-lite-lite stops winning
 
-- **Above ~50 concurrent users.** The single App Runner instance + single Fargate worker tops out. B-lite's Lambda + scaling Fargate handles bursts more gracefully.
+- **Above ~50 concurrent users.** Express Mode auto-scales the backend (default cap: 3 tasks), and the single Fargate worker tops out. B-lite's Lambda + scaling Fargate handles bursts more gracefully and bills per-request.
 - **Above ~100 jobs/hour.** Both DB options start to hurt:
   - **Supabase Free** caps at ~60 concurrent connections and 500 MB storage. The pipeline's RAG queries cause connection churn; you'll see `too many clients already`. Move to Supabase Pro ($25/mo, ~200 connections, 8 GB) or migrate to RDS.
   - **RDS `t4g.micro`** has 1 vCPU / 1 GB with a sensible ceiling around 2 conn-per-vCPU; bump to `t4g.small` (~$28/mo) or move to Aurora Serverless v2.
@@ -389,13 +477,13 @@ Both estimates are **idle / low-traffic baselines** (no real users, minimal LLM 
 
 | | B-lite-lite | B-lite |
 |---|---|---|
-| Auto-scales request path | only within App Runner's auto-scaling | Lambda → effectively unbounded |
+| Auto-scales request path | Express Mode scales 1 → maxTaskCount (3 default) | Lambda → effectively unbounded |
 | DB headroom | t4g.micro ceiling ~50 connections | Aurora ACU scales 0.5 → 16 |
 | Hot read path | Postgres | DynamoDB single-digit ms |
-| Edge ACLs / rate limiting | missing (App Runner has no native WAF) | CloudFront + WAF |
+| Edge ACLs / rate limiting | missing (Express Mode's auto-ALB has no WAF by default) | CloudFront + WAF |
 | Operational complexity | 4 AWS services | 7+ AWS services |
 
-For Phase 1 + the "honest backtest dashboard" of Phase 2, B-lite-lite is more than enough. The migration to B-lite is also incremental: swap RDS → Aurora first, then put API Gateway + Lambda *in front of* App Runner (or replace it), then add DynamoDB. Nothing about this plan paints you into a corner.
+For Phase 1 + the "honest backtest dashboard" of Phase 2, B-lite-lite is more than enough. The migration to B-lite is also incremental: swap RDS → Aurora first, then put API Gateway + Lambda *in front of* Express Mode (or replace it), then add DynamoDB. Nothing about this plan paints you into a corner.
 
 ---
 
@@ -405,7 +493,8 @@ For Phase 1 + the "honest backtest dashboard" of Phase 2, B-lite-lite is more th
 aws ecs update-service --cluster $PROJECT --service $PROJECT-worker --desired-count 0
 aws ecs delete-service --cluster $PROJECT --service $PROJECT-worker --force
 aws ecs delete-cluster --cluster $PROJECT
-# Delete the App Runner service from the console (no CLI shortcut without ARN lookup).
+# Delete the Express Mode service (this also tears down its auto-provisioned ALB + target group)
+aws ecs delete-express-gateway-service --service-arn "$EXPRESS_SERVICE_ARN" --force
 
 # Option A (Supabase): delete the project from supabase.com → Project → Settings → General → Delete project.
 # Option B (RDS):
@@ -421,12 +510,14 @@ aws ecr delete-repository --repository-name $PROJECT-worker  --force
 
 ## Troubleshooting
 
-- **App Runner deploy stuck "Operation in progress"** — Option B (RDS) only: usually a VPC-connector misconfiguration. The connector needs subnets *and* a security group that the RDS instance's security group ingress allows. Option A (Supabase) should never hit this; if it does, the App Runner service has a misconfigured VPC connector it doesn't need — remove it.
+- **`aws ecs create-express-gateway-service` stuck at PROVISIONING** — `--monitor-resources` prints exactly which sub-resource (target group, ALB, listener, service) is taking time. Most stalls are VPC-route issues; Option B (RDS) hits these when the service is created in a subnet without a route to the RDS subnet. Option A (Supabase) hits this rarely — the default-VPC config Express Mode picks works out-of-the-box for public-internet egress.
+- **`AccessDeniedException` on `iam:PassRole`** — your deploy IAM user can pass the ExecutionRole and InfrastructureRole ARNs. Add an `iam:PassRole` statement scoped to those two role ARNs, or attach `AmazonECS_FullAccess` to the deploy user temporarily.
+- **Express Mode service URL returns 503** — ALB health check is failing. Confirm `containerPort: 8000` matches Dockerfile.backend, and that `--health-check-path "/api/health"` points at an endpoint that returns 200 without touching the DB. Inspect with `aws ecs describe-express-gateway-service --service-arn ...`.
 - **Worker exits with `psycopg.OperationalError`** —
   - *Option A:* `DATABASE_URL` is wrong (most often you pasted the pooled URL on port 6543 and the worker needs the direct URL on 5432), or the password contains URL-unsafe characters that weren't percent-encoded.
   - *Option B:* Fargate task's security group isn't in the DB's allowed ingress list, or the DB endpoint isn't reachable from the task's subnet.
 - **Supabase: `FATAL: too many connections for role`** — you hit the free tier's ~60 connection ceiling. Either move the backend to the pooled URL (port 6543), drop `WORKER_POLL_SECONDS` (each poll opens then returns a connection — verify the worker uses a connection pool), or upgrade to Pro.
 - **Supabase: schema/extension errors on first run** — pgvector extension wasn't enabled in the dashboard. Go to Database → Extensions → search `vector` → toggle on, then redeploy the worker. The app's `ensure_schema()` does *not* `CREATE EXTENSION` (Supabase requires the dashboard toggle for the first install).
 - **`/api/snapshot/...` returns 202 forever** — worker isn't draining. Most common cause: ECS service desired-count is 0, or the task is stuck pulling the image. Check `aws ecs describe-services` and the task's CloudWatch logs.
-- **Backend image fails to push from Apple Silicon** — you skipped `--platform linux/amd64` on the `docker buildx` command. The image will be `arm64`-only and App Runner Fargate runners reject it.
+- **Backend image fails to run from Apple Silicon push** — you skipped `--platform linux/amd64` on the `docker buildx` command. The image will be `arm64`-only and Fargate (x86_64 by default) rejects it.
 - **SEC EDGAR returns 403 / rate-limit** — `SEC_USER_AGENT` is unset or generic. Set it to a real `Name <email>` string and redeploy the worker.

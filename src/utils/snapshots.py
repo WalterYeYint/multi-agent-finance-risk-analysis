@@ -104,6 +104,40 @@ def get_latest_snapshot(ticker: str, horizon: HorizonName) -> Optional[dict]:
     return _row_to_dict(row) if row else None
 
 
+def list_latest_snapshots_overview() -> list[dict]:
+    """Latest snapshot per (ticker, horizon), trimmed to the few fields the
+    landing-page overview table needs (recommendation source text + headline
+    return). One read-only query — this never touches the jobs queue, so the
+    landing page can call it freely without enqueueing pipeline work."""
+    ensure_schema()
+    with connect() as conn, conn.cursor() as cur:
+        cur.execute(
+            "SELECT DISTINCT ON (ticker, horizon) "
+            "ticker, horizon, generated_at, "
+            "debate ->> 'consensus_summary' AS consensus_summary, "
+            "valuation ->> 'cumulative_return' AS cumulative_return "
+            "FROM snapshots ORDER BY ticker, horizon, generated_at DESC"
+        )
+        rows = cur.fetchall()
+
+    out: list[dict] = []
+    for ticker, horizon, generated_at, consensus_summary, cumulative_return in rows:
+        try:
+            cum = float(cumulative_return) if cumulative_return is not None else None
+        except (TypeError, ValueError):
+            cum = None
+        if cum is not None and not math.isfinite(cum):
+            cum = None
+        out.append({
+            "ticker": ticker,
+            "horizon": horizon,
+            "generated_at": generated_at,
+            "consensus_summary": consensus_summary,
+            "cumulative_return": cum,
+        })
+    return out
+
+
 def list_tracked_tickers() -> list[dict]:
     """Distinct tickers that have at least one snapshot, with the most recent
     `generated_at` across all horizons and a total snapshot count. Powers the

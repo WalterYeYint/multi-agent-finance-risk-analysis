@@ -2,6 +2,7 @@ from flask import Flask, request, jsonify
 from flask_cors import CORS
 import sys
 import os
+import re
 import traceback
 import requests
 import io
@@ -17,7 +18,7 @@ if SRC_DIR not in sys.path:
 from utils.horizons import get_horizon, HORIZONS
 from utils.snapshots import (
     get_latest_snapshot, is_fresh, list_snapshot_history, list_tracked_tickers,
-    get_or_create_pending_job, get_job,
+    list_latest_snapshots_overview, get_or_create_pending_job, get_job,
 )
 
 from markdown_pdf import MarkdownPdf, Section
@@ -162,10 +163,16 @@ def _job_response(job: dict, http_status: int = 202):
 # an entry.
 _SNAPSHOT_TTL_S = 60
 _TICKERS_TTL_S = 300
+_OVERVIEW_TTL_S = 60
+# Price data updates intraday but we don't need second-by-second freshness for a
+# research chart. 15 min is a fair compromise between yfinance load and UI freshness.
+_PRICE_TTL_S = 900
 _cache_lock = Lock()
 _snapshot_cache: TTLCache = TTLCache(maxsize=1024, ttl=_SNAPSHOT_TTL_S)
 _history_cache: TTLCache = TTLCache(maxsize=512, ttl=_SNAPSHOT_TTL_S)
 _tickers_cache: TTLCache = TTLCache(maxsize=4, ttl=_TICKERS_TTL_S)
+_price_cache: TTLCache = TTLCache(maxsize=256, ttl=_PRICE_TTL_S)
+_overview_cache: TTLCache = TTLCache(maxsize=1, ttl=_OVERVIEW_TTL_S)
 
 
 @cached(cache=_snapshot_cache, lock=_cache_lock)
@@ -181,6 +188,72 @@ def _cached_snapshot_history(ticker: str, horizon_name: str, days: int):
 @cached(cache=_tickers_cache, lock=_cache_lock)
 def _cached_tracked_tickers():
     return list_tracked_tickers()
+
+
+@cached(cache=_overview_cache, lock=_cache_lock)
+def _cached_overview():
+    return list_latest_snapshots_overview()
+
+
+# yfinance is NOT thread-safe: concurrent yf.download() calls clobber each other
+# through shared global state, so three simultaneous (ticker, period) fetches all
+# return whichever period won the race — which made every horizon's sparkline
+# identical on the overview table. We serialize every download behind this lock
+# AND fetch each ticker's full 2y series exactly once, slicing it for the shorter
+# windows. That removes the race entirely, guarantees the three horizons are
+# consistent slices of the same data, and cuts the N×3 fanout to N.
+_yf_lock = Lock()
+
+# Trading-day windows roughly matching yfinance's 1mo / 6mo / 2y row counts.
+_PERIOD_TAIL = {"1mo": 22, "6mo": 124, "2y": None}  # None = full series
+
+
+@cached(cache=_price_cache, lock=_cache_lock)
+def _cached_price_full(ticker: str):
+    """Full 2y daily close series for `ticker`, fetched once and cached. Returns
+    list of {date: 'YYYY-MM-DD', close: float}; empty list on data failure.
+    Serialized behind _yf_lock because yfinance is not thread-safe."""
+    import math
+    import yfinance as yf  # lazy import — keeps cold-start of the backend fast
+    try:
+        with _yf_lock:
+            df = yf.download(ticker, period="2y", interval="1d",
+                             auto_adjust=False, progress=False)
+        if df is None or df.empty:
+            return []
+        df = df.reset_index()
+        # yfinance may return a MultiIndex (single ticker still); flatten if so.
+        if hasattr(df.columns, "nlevels") and df.columns.nlevels > 1:
+            df.columns = [c[0] if c[1] in ("", ticker) else c[0] for c in df.columns]
+        rows = []
+        for _, r in df.iterrows():
+            close = r.get("Close")
+            if close is None:
+                continue
+            try:
+                close = float(close)
+            except (TypeError, ValueError):
+                continue
+            if not math.isfinite(close):
+                continue
+            date_val = r.get("Date")
+            strftime = getattr(date_val, "strftime", None)
+            date_str = strftime("%Y-%m-%d") if strftime else str(date_val)[:10]
+            rows.append({"date": date_str, "close": close})
+        return rows
+    except Exception as e:  # noqa: BLE001
+        print(f"⚠️  /api/price fetch failed for {ticker}: {e}")
+        return []
+
+
+def _cached_price_series(ticker: str, period: str):
+    """Daily close prices over `period` (1mo / 6mo / 2y), sliced from the cached
+    2y series so the three horizons are always distinct, consistent windows."""
+    full = _cached_price_full(ticker)
+    tail = _PERIOD_TAIL.get(period)
+    if tail is None or len(full) <= tail:
+        return full
+    return full[-tail:]
 
 
 def _resolve_snapshot(ticker: str, horizon):
@@ -263,6 +336,63 @@ def snapshot_history(ticker, horizon):
         for r in rows
     ]
     return jsonify({'ticker': ticker.strip().upper(), 'horizon': h.name, 'history': history})
+
+
+_VALID_PRICE_PERIODS = {"1mo", "6mo", "2y"}
+
+
+@app.route('/api/price/<ticker>', methods=['GET'])
+def price_series(ticker):
+    """Daily close prices for one of the three horizon lookback windows.
+    Used by the price chart on the TickerView. Server-cached for 15 min."""
+    period = (request.args.get('period') or '1mo').strip().lower()
+    if period not in _VALID_PRICE_PERIODS:
+        return jsonify({'error': f"period must be one of {sorted(_VALID_PRICE_PERIODS)}"}), 400
+    series = _cached_price_series(ticker.strip().upper(), period)
+    return jsonify({
+        'ticker': ticker.strip().upper(),
+        'period': period,
+        'series': series,
+    })
+
+
+def _pick_recommendation(text):
+    """Extract the BUY/HOLD/SELL token from the debate's consensus_summary.
+    Mirrors the client-side logic in HorizonSummaryStrip.jsx: word-boundary
+    scan in priority order — explicit "SELL" wins over "BUY" if both appear,
+    because recommendations are negated ("avoid a BUY") more than promoted."""
+    if not text or not isinstance(text, str):
+        return None
+    upper = text.upper()
+    for token in ('SELL', 'BUY', 'HOLD'):
+        if re.search(rf'\b{token}\b', upper):
+            return token
+    return None
+
+
+@app.route('/api/overview', methods=['GET'])
+def overview():
+    """Landing-page table: latest recommendation + headline return for every
+    tracked (ticker, horizon). Strictly read-only — unlike /api/snapshot, this
+    NEVER enqueues pipeline jobs, so the landing page can call it freely."""
+    by_ticker = {}
+    for row in _cached_overview():
+        horizon = row['horizon']
+        if horizon not in HORIZONS:
+            continue
+        entry = by_ticker.setdefault(row['ticker'], {
+            h: {'recommendation': None, 'cumulative_return': None, 'generated_at': None}
+            for h in HORIZONS
+        })
+        entry[horizon] = {
+            'recommendation': _pick_recommendation(row.get('consensus_summary')),
+            'cumulative_return': row.get('cumulative_return'),
+            'generated_at': row['generated_at'].isoformat() if row.get('generated_at') else None,
+        }
+    return jsonify({'tickers': [
+        {'ticker': ticker, 'horizons': horizons}
+        for ticker, horizons in sorted(by_ticker.items())
+    ]})
 
 
 @app.route('/api/tickers', methods=['GET'])
