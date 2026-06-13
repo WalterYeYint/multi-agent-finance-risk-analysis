@@ -6,6 +6,12 @@ __pycache__
 *.pyo
 *.pyd
 
+# Secrets — never bake into an image. On AWS, env is injected via the ECS task
+# definition / Secrets Manager (see AWS_DEPLOYMENT.md), not via a .env file.
+.env
+.env.*
+.streamlit/secrets.toml
+
 # Frontend is shipped to S3 — not built into the backend image
 frontend/
 

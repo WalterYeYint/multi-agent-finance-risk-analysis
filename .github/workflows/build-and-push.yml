@@ -189,3 +189,84 @@ jobs:
       - name: Tear down worker
         if: always()
         run: docker rm -f worker || true
+
+  deploy:
+    name: deploy to AWS
+    needs: smoke-test
+    if: github.event_name == 'workflow_dispatch' || (github.event_name == 'push' && github.ref == 'refs/heads/main')
+    runs-on: ubuntu-latest
+
+    env:
+      ECS_CLUSTER: finance-agents
+      ECS_SERVICE_WORKER: finance-agents-worker
+      ECS_EXPRESS_SERVICE_NAME: finance-agents-backend
+      # Bind these secrets to env so step-level `if:` conditions can read them.
+      # `secrets.*` is not a valid context inside `if:`; `env.*` is.
+      ECS_EXEC_ROLE_ARN: ${{ secrets.ECS_EXEC_ROLE_ARN }}
+      ECS_INFRA_ROLE_ARN: ${{ secrets.ECS_INFRA_ROLE_ARN }}
+      # Secrets Manager ARNs for the backend's runtime secrets (not the values —
+      # ECS fetches the values at container start). See AWS_DEPLOYMENT.md Step 3.5.
+      DATABASE_URL_SECRET_ARN: ${{ secrets.DATABASE_URL_SECRET_ARN }}
+      OPENAI_KEY_SECRET_ARN: ${{ secrets.OPENAI_KEY_SECRET_ARN }}
+
+    steps:
+      - name: Configure AWS credentials
+        uses: aws-actions/configure-aws-credentials@v4
+        with:
+          aws-access-key-id: ${{ secrets.AWS_ACCESS_KEY_ID }}
+          aws-secret-access-key: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
+          aws-region: ${{ env.AWS_REGION }}
+
+      - name: Log in to Amazon ECR
+        id: ecr-login
+        uses: aws-actions/amazon-ecr-login@v2
+
+      # Backend — ECS Express Mode. The official action wraps
+      # create-express-gateway-service / update-express-gateway-service so the same
+      # step works on first deploy (creates the service + ALB + URL) and on every
+      # subsequent push (rolls a new revision). Idempotent.
+      # environment-variables passes non-secret config inline; secrets passes
+      # Secrets Manager ARNs as valueFrom (ECS resolves the values at start).
+      # Both are passed on EVERY deploy so the service is fully configured whether
+      # this run creates it or updates it — the action's update semantics for env
+      # preservation are undocumented, so we re-assert rather than rely on them.
+      - name: Deploy backend to ECS Express Mode
+        if: env.ECS_EXEC_ROLE_ARN != '' && env.ECS_INFRA_ROLE_ARN != '' && env.DATABASE_URL_SECRET_ARN != '' && env.OPENAI_KEY_SECRET_ARN != ''
+        uses: aws-actions/amazon-ecs-deploy-express-service@v1
+        with:
+          service-name: ${{ env.ECS_EXPRESS_SERVICE_NAME }}
+          image: ${{ steps.ecr-login.outputs.registry }}/${{ env.ECR_REPO_PREFIX }}-backend:${{ github.sha }}
+          execution-role-arn: ${{ env.ECS_EXEC_ROLE_ARN }}
+          infrastructure-role-arn: ${{ env.ECS_INFRA_ROLE_ARN }}
+          container-port: 8000
+          environment-variables: '[{"name":"MODEL_PROVIDER","value":"openai"}]'
+          secrets: '[{"name":"DATABASE_URL","valueFrom":"${{ env.DATABASE_URL_SECRET_ARN }}"},{"name":"OPENAI_API_KEY","valueFrom":"${{ env.OPENAI_KEY_SECRET_ARN }}"}]'
+
+      - name: Skip backend deploy (not fully configured)
+        if: env.ECS_EXEC_ROLE_ARN == '' || env.ECS_INFRA_ROLE_ARN == '' || env.DATABASE_URL_SECRET_ARN == '' || env.OPENAI_KEY_SECRET_ARN == ''
+        run: |
+          echo "::warning::Backend deploy skipped — one or more required secrets are unset:"
+          echo "  ECS_EXEC_ROLE_ARN, ECS_INFRA_ROLE_ARN (AWS_DEPLOYMENT.md Step 4a)"
+          echo "  DATABASE_URL_SECRET_ARN, OPENAI_KEY_SECRET_ARN (AWS_DEPLOYMENT.md Step 3.5)"
+          echo "Add all four as repo secrets, then re-run."
+
+      # Worker — Fargate doesn't auto-poll ECR. force-new-deployment makes the
+      # service spawn a new task with the freshly-pushed :latest image, then
+      # drain the old one.
+      - name: Force ECS service redeploy (worker)
+        run: |
+          STATUS=$(aws ecs describe-services \
+            --cluster "$ECS_CLUSTER" \
+            --services "$ECS_SERVICE_WORKER" \
+            --query 'services[0].status' --output text 2>/dev/null || echo missing)
+          if [ "$STATUS" != "ACTIVE" ]; then
+            echo "::warning::ECS service $ECS_CLUSTER/$ECS_SERVICE_WORKER not found or not ACTIVE (status: $STATUS) — skipping worker deploy."
+            echo "Create the cluster + service first (AWS_DEPLOYMENT.md Step 5)."
+            exit 0
+          fi
+          DEPLOY_ID=$(aws ecs update-service \
+            --cluster "$ECS_CLUSTER" \
+            --service "$ECS_SERVICE_WORKER" \
+            --force-new-deployment \
+            --query 'service.deployments[0].id' --output text)
+          echo "✓ ECS worker redeploy triggered. DeploymentId: $DEPLOY_ID"

@@ -197,6 +197,79 @@ docker buildx build --platform linux/amd64 -f Dockerfile.worker \
 
 ---
 
+## Step 3.5 — Secrets (Secrets Manager)
+
+The containers need two **secret** values at runtime — `DATABASE_URL` (your Supabase URL, which embeds the DB password) and `OPENAI_API_KEY`. These must **not** live in the task definition as plaintext, in the image, or in GitHub. They go in AWS Secrets Manager; the ECS task reads them at container start; only their (non-sensitive) ARNs ever appear in config.
+
+> **Why not GitHub Actions secrets?** Those authenticate the *deploy pipeline* to AWS (build/push/deploy). They are a different plane from the *app's* runtime config. The app's secret **values** never need to touch GitHub — the workflow references only the Secrets Manager **ARNs**, which aren't sensitive.
+
+### Create the two secrets
+
+```bash
+# Pull the values straight from your local .env (they never get committed).
+source .env   # or paste the values inline
+
+aws secretsmanager create-secret \
+   --name $PROJECT/database-url \
+   --secret-string "$DATABASE_URL" \
+   --region $AWS_REGION
+
+aws secretsmanager create-secret \
+   --name $PROJECT/openai-key \
+   --secret-string "$OPENAI_API_KEY" \
+   --region $AWS_REGION
+
+# Capture the ARNs — the deploy step and the worker task definition reference these.
+export DATABASE_URL_SECRET_ARN=$(aws secretsmanager describe-secret \
+   --secret-id $PROJECT/database-url --query ARN --output text --region $AWS_REGION)
+export OPENAI_KEY_SECRET_ARN=$(aws secretsmanager describe-secret \
+   --secret-id $PROJECT/openai-key --query ARN --output text --region $AWS_REGION)
+echo "$DATABASE_URL_SECRET_ARN"
+echo "$OPENAI_KEY_SECRET_ARN"
+```
+
+> To rotate a value later: `aws secretsmanager put-secret-value --secret-id $PROJECT/openai-key --secret-string "sk-new..."`. The next container start picks it up — no image rebuild.
+
+### Grant the execution role read access
+
+The **task execution role** (`ecsTaskExecutionRole`, created in [Step 4a](#4a--iam-roles-one-time)) is what ECS uses to fetch these at container start. Attach an inline policy scoped to exactly these two secrets — run this **after** Step 4a creates the role:
+
+```bash
+aws iam put-role-policy \
+   --role-name ecsTaskExecutionRole \
+   --policy-name ReadAppSecrets \
+   --policy-document "$(cat <<EOF
+{
+  "Version": "2012-10-17",
+  "Statement": [{
+    "Effect": "Allow",
+    "Action": "secretsmanager:GetSecretValue",
+    "Resource": ["$DATABASE_URL_SECRET_ARN", "$OPENAI_KEY_SECRET_ARN"]
+  }]
+}
+EOF
+)"
+```
+
+Without this grant, the service creation/update succeeds but tasks fail to start with `ResourceInitializationError: unable to pull secrets`.
+
+### Wire the ARNs into CI (for the GitHub Actions deploy)
+
+If you deploy via `build-and-push.yml` (rather than the manual `create-express-gateway-service` in 4b), add the two ARNs as GitHub repo secrets so the deploy step can pass them as `valueFrom`:
+
+```bash
+# GitHub → repo → Settings → Secrets and variables → Actions → New repository secret
+#   DATABASE_URL_SECRET_ARN = <the arn echoed above>
+#   OPENAI_KEY_SECRET_ARN    = <the arn echoed above>
+# (These ARNs are not sensitive; they're stored as secrets only to match the
+#  existing ECS_EXEC_ROLE_ARN / ECS_INFRA_ROLE_ARN pattern. Repo *variables*
+#  would work equally well.)
+```
+
+The deploy job already passes them as the `secrets:` input to `aws-actions/amazon-ecs-deploy-express-service`, and `MODEL_PROVIDER=openai` as a plain `environment-variables` entry — so a CI-created service comes up fully configured, and every subsequent deploy re-asserts the env (safe even if the action would otherwise replace the container definition).
+
+---
+
 ## Step 4 — Backend (ECS Express Mode)
 
 > **Why not App Runner?** AWS announced on 30 Apr 2026 that App Runner stopped accepting new customers, and the recommended replacement is **Amazon ECS Express Mode** (launched 21 Nov 2025). Express Mode is the spiritual successor: provide a container image and two IAM roles, and ECS provisions a Fargate service + Application Load Balancer + auto-scaling + a `*.ecs.<region>.on.aws` HTTPS URL with a single API call. No extra charge for Express Mode itself — you pay only for the Fargate compute + ALB underneath.
