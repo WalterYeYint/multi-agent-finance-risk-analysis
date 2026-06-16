@@ -500,6 +500,8 @@ Smaller settings cut this meaningfully:
 
 The worker polls every 3 s and must run continuously. Unlike the backend, it doesn't expose HTTP — so it doesn't belong on Express Mode. Plain ECS Fargate with `desired-count=1` is the right shape.
 
+> **Worker env note.** The worker now also ingests SEC EDGAR filings: on-demand before each pipeline run (only when a ticker has no stored filings — there are no local PDFs on AWS) and on a weekly sweep across all tracked tickers for newly-released filings. So `SEC_USER_AGENT` must be a real contact string on the worker or SEC throttles the downloads. The worker also fetches Polygon price series for snapshots, so `POLYGON_API_KEY` is required there too (both are in the task def below). Tunables: `WORKER_FILING_SCAN_SECONDS` (weekly sweep interval, default `604800`), `EDGAR_FORMS` (default `10-K,10-Q`), `EDGAR_LIMIT` (max filings per form per ticker, default `4`).
+
 ```bash
 # 5a) Create cluster
 aws ecs create-cluster --cluster-name $PROJECT --region $AWS_REGION
@@ -541,7 +543,10 @@ cat > task-worker.json <<EOF
       {"name": "MODEL_PROVIDER",       "value": "openai"},
       {"name": "SEC_USER_AGENT",       "value": "Your Name <you@example.com>"},
       {"name": "WORKER_POLL_SECONDS",  "value": "3"},
-      {"name": "WORKER_REFRESH_SCAN_SECONDS", "value": "300"}
+      {"name": "WORKER_REFRESH_SCAN_SECONDS", "value": "300"},
+      {"name": "WORKER_FILING_SCAN_SECONDS",  "value": "604800"},
+      {"name": "EDGAR_FORMS",          "value": "10-K,10-Q"},
+      {"name": "EDGAR_LIMIT",          "value": "4"}
     ],
     "secrets": [
       {"name": "DATABASE_URL",    "valueFrom": "$DATABASE_URL_SECRET_ARN"},
@@ -564,6 +569,7 @@ EOF
 aws ecs register-task-definition --cli-input-json file://task-worker.json
 
 # 5c) Service: desired-count = 1 (single-worker by design — serial pipeline)
+
 #
 # Network config differs by DB choice:
 #   Option A (Supabase): any SG with outbound internet; the default VPC's default

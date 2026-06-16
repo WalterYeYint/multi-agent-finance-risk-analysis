@@ -27,7 +27,7 @@ from utils.horizons import HORIZONS, Horizon, HorizonName
 _SNAPSHOT_COLS = (
     "id", "ticker", "horizon", "generated_at",
     "sentiment", "fundamental", "valuation", "metrics", "debate",
-    "report_markdown", "cost_usd", "latency_ms",
+    "report_markdown", "cost_usd", "latency_ms", "prices",
 )
 
 
@@ -62,17 +62,21 @@ def _to_jsonb(model: Any) -> Optional[Jsonb]:
 
 
 def save_snapshot(*, ticker: str, horizon: HorizonName, state: Any,
-                  latency_ms: int, cost_usd: Optional[float] = None) -> int:
+                  latency_ms: int, cost_usd: Optional[float] = None,
+                  prices: Optional[list] = None) -> int:
     """Persist one snapshot row from a completed pipeline `State`. Returns the
     new snapshot id. `state.report.markdown_report` is stored as plain text;
-    everything else as JSONB."""
+    everything else as JSONB. `prices` is the Polygon daily-close series
+    (list of {"date","close"}) the worker captured for this horizon — stored so
+    /api/price reads it from Postgres instead of calling Polygon live."""
     ensure_schema()
+    prices_jsonb = Jsonb(_sanitize_for_json(prices)) if prices else None
     with connect() as conn, conn.cursor() as cur:
         cur.execute(
             """INSERT INTO snapshots
                (ticker, horizon, sentiment, fundamental, valuation, metrics,
-                debate, report_markdown, cost_usd, latency_ms)
-               VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
+                debate, report_markdown, cost_usd, latency_ms, prices)
+               VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
                RETURNING id""",
             (
                 ticker.upper(), horizon,
@@ -82,7 +86,7 @@ def save_snapshot(*, ticker: str, horizon: HorizonName, state: Any,
                 _to_jsonb(getattr(state, "metrics", None)),
                 _to_jsonb(getattr(state, "debate", None)),
                 state.report.markdown_report if getattr(state, "report", None) else None,
-                cost_usd, latency_ms,
+                cost_usd, latency_ms, prices_jsonb,
             ),
         )
         snapshot_id = cur.fetchone()[0]
@@ -102,6 +106,25 @@ def get_latest_snapshot(ticker: str, horizon: HorizonName) -> Optional[dict]:
         )
         row = cur.fetchone()
     return _row_to_dict(row) if row else None
+
+
+def get_latest_prices(ticker: str) -> Optional[list]:
+    """Return the daily-close price series from the most recent snapshot for
+    `ticker` that actually has a non-empty `prices` field (any horizon — the
+    full ~2y series is stored regardless of horizon and sliced at read time).
+    Returns None when no snapshot carries prices (old snapshots, or worker had
+    no POLYGON_API_KEY), so the caller can fall back to a live fetch."""
+    ensure_schema()
+    with connect() as conn, conn.cursor() as cur:
+        cur.execute(
+            "SELECT prices FROM snapshots "
+            "WHERE ticker = %s AND prices IS NOT NULL "
+            "AND jsonb_array_length(prices) > 0 "
+            "ORDER BY generated_at DESC LIMIT 1",
+            (ticker.upper(),),
+        )
+        row = cur.fetchone()
+    return row[0] if row else None
 
 
 def list_latest_snapshots_overview() -> list[dict]:

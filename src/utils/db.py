@@ -100,8 +100,14 @@ CREATE TABLE IF NOT EXISTS snapshots (
     debate          JSONB,
     report_markdown TEXT,
     cost_usd        NUMERIC(10, 4),
-    latency_ms      INTEGER
+    latency_ms      INTEGER,
+    prices          JSONB             -- persisted daily-close series (Polygon),
+                                      -- served by /api/price so the request path
+                                      -- never has to call Polygon live.
 );
+
+-- Idempotent migration for snapshots created before the `prices` column existed.
+ALTER TABLE snapshots ADD COLUMN IF NOT EXISTS prices JSONB;
 
 CREATE INDEX IF NOT EXISTS snapshots_lookup_idx
     ON snapshots (ticker, horizon, generated_at DESC);

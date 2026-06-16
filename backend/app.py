@@ -19,7 +19,9 @@ from utils.horizons import get_horizon, HORIZONS
 from utils.snapshots import (
     get_latest_snapshot, is_fresh, list_snapshot_history, list_tracked_tickers,
     list_latest_snapshots_overview, get_or_create_pending_job, get_job,
+    get_latest_prices,
 )
+from utils.prices import fetch_price_series_polygon, slice_period, PERIOD_TAIL
 
 from markdown_pdf import MarkdownPdf, Section
 
@@ -182,6 +184,9 @@ _snapshot_cache: TTLCache = TTLCache(maxsize=1024, ttl=_SNAPSHOT_TTL_S)
 _history_cache: TTLCache = TTLCache(maxsize=512, ttl=_SNAPSHOT_TTL_S)
 _tickers_cache: TTLCache = TTLCache(maxsize=4, ttl=_TICKERS_TTL_S)
 _price_cache: TTLCache = TTLCache(maxsize=256, ttl=_PRICE_TTL_S)
+# Separate cache so the snapshot-read and the live-Polygon-fallback paths (both
+# keyed on `ticker`) don't collide in one cachetools cache.
+_price_fallback_cache: TTLCache = TTLCache(maxsize=256, ttl=_PRICE_TTL_S)
 _overview_cache: TTLCache = TTLCache(maxsize=1, ttl=_OVERVIEW_TTL_S)
 
 
@@ -205,70 +210,44 @@ def _cached_overview():
     return list_latest_snapshots_overview()
 
 
-# Price history comes from Polygon aggregates (plain HTTP via requests), NOT
-# yfinance. yfinance pulls in curl_cffi, a native extension that crashes the
-# backend container on python:slim images (the ALB then serves 502), and Yahoo
-# IP-blocks AWS datacenter ranges regardless. We fetch each ticker's full ~2y
-# daily series once (cached 15 min) and slice it for the shorter windows, so the
-# three horizons are consistent slices of one fetch and the overview table's N×3
-# fanout collapses to N Polygon calls.
-_PERIOD_TAIL = {"1mo": 22, "6mo": 124, "2y": None}  # None = full series
+# Price history is served from the worker-persisted snapshot (`snapshots.prices`,
+# a full ~2y Polygon daily-close series captured at pipeline run time), so the
+# request path normally never calls Polygon. Polygon is a live fallback only,
+# for tickers whose latest snapshot predates this feature or was generated
+# without POLYGON_API_KEY on the worker. The Polygon fetch + slicing logic lives
+# in utils.prices so the backend and the pipeline share one implementation.
+#
+# yfinance is deliberately NOT used: it pulls in curl_cffi (a native extension
+# that crashes the backend container on python:slim — the ALB then serves 502)
+# and Yahoo IP-blocks AWS datacenter ranges regardless.
+_PERIOD_TAIL = PERIOD_TAIL  # {"1mo": 22, "6mo": 124, "2y": None}; None = full series
 
 
 @cached(cache=_price_cache, lock=_cache_lock)
+def _cached_snapshot_prices(ticker: str):
+    """Full ~2y daily close series for `ticker`, read from the latest snapshot
+    that carries one. Returns None when no snapshot has prices, so the caller
+    can fall back to a live Polygon fetch. Cached 15 min per ticker."""
+    return get_latest_prices(ticker)
+
+
+@cached(cache=_price_fallback_cache, lock=_cache_lock)
 def _cached_price_full(ticker: str):
-    """Full ~2y daily close series for `ticker` from Polygon aggregates. Returns
-    list of {date: 'YYYY-MM-DD', close: float}; empty list on any failure or
-    missing key — the caller renders an empty chart, never a 500/crash."""
-    import math
-    from datetime import datetime, date, timedelta, timezone
-
-    api_key = os.getenv("POLYGON_API_KEY")
-    if not api_key:
-        print("⚠️  /api/price: POLYGON_API_KEY not set — returning empty series")
-        return []
-
-    today = date.today()
-    start = today - timedelta(days=365 * 2 + 7)
-    url = (f"https://api.polygon.io/v2/aggs/ticker/{ticker.upper()}"
-           f"/range/1/day/{start.isoformat()}/{today.isoformat()}")
-    try:
-        resp = requests.get(
-            url,
-            params={"adjusted": "true", "sort": "asc", "limit": 50000, "apiKey": api_key},
-            timeout=10,
-        )
-        if resp.status_code != 200:
-            print(f"⚠️  /api/price: Polygon {resp.status_code} for {ticker}: {resp.text[:200]}")
-            return []
-        results = (resp.json() or {}).get("results") or []
-        rows = []
-        for bar in results:
-            close, ts = bar.get("c"), bar.get("t")
-            if close is None or ts is None:
-                continue
-            try:
-                close = float(close)
-            except (TypeError, ValueError):
-                continue
-            if not math.isfinite(close):
-                continue
-            d = datetime.fromtimestamp(ts / 1000.0, tz=timezone.utc).date()
-            rows.append({"date": d.isoformat(), "close": close})
-        return rows
-    except Exception as e:  # noqa: BLE001
-        print(f"⚠️  /api/price fetch failed for {ticker}: {e}")
-        return []
+    """Live Polygon fallback: full ~2y daily close series, list of
+    {date: 'YYYY-MM-DD', close: float}; empty list on any failure or missing
+    key. Only used when the snapshot has no persisted prices."""
+    return fetch_price_series_polygon(ticker, years=2.0)
 
 
 def _cached_price_series(ticker: str, period: str):
-    """Daily close prices over `period` (1mo / 6mo / 2y), sliced from the cached
-    2y series so the three horizons are always distinct, consistent windows."""
-    full = _cached_price_full(ticker)
-    tail = _PERIOD_TAIL.get(period)
-    if tail is None or len(full) <= tail:
-        return full
-    return full[-tail:]
+    """Daily close prices over `period` (1mo / 6mo / 2y). Reads the full series
+    from the latest snapshot (worker-persisted Polygon series) and slices it per
+    period; falls back to a live Polygon fetch only when no snapshot carries
+    prices. The three horizons are always distinct slices of one ~2y series."""
+    full = _cached_snapshot_prices(ticker)
+    if not full:
+        full = _cached_price_full(ticker)
+    return slice_period(full or [], period)
 
 
 def _resolve_snapshot(ticker: str, horizon):

@@ -7,7 +7,7 @@ ingests them into the Postgres + pgvector RAG store — replacing the manual
 stored by accession number) and safe to run on a cron / EventBridge schedule.
 
 Usage:
-    python -m src.utils.edgar_ingest --tickers AAPL,MSFT,GOOGL
+    python -m src.utils.edgar_ingest --tickers AAPL,MSFT,GOOGL --forms 10-Q --limit 2
     python -m src.utils.edgar_ingest --tickers TSLA --forms 10-Q --limit 4
     python -m src.utils.edgar_ingest --tickers AAPL --force
 
@@ -240,6 +240,80 @@ def ingest_tickers(tickers: List[str], forms: List[str], limit: int,
         except Exception as e:
             print(f"\n❌ {ticker}: ingest failed — {e}")
     return total
+
+
+# ----------------------------------------------------- on-demand / sweep hooks
+def _env_forms() -> List[str]:
+    raw = os.getenv("EDGAR_FORMS", "10-K,10-Q")
+    forms = [f.strip().upper() for f in raw.split(",") if f.strip()]
+    return forms or ["10-K", "10-Q"]
+
+
+def _env_limit() -> int:
+    try:
+        return max(1, int(os.getenv("EDGAR_LIMIT", "4")))
+    except (TypeError, ValueError):
+        return 4
+
+
+def ensure_filings(ticker: str, *, progress_cb=None) -> int:
+    """Pipeline pre-flight: make sure `ticker` has SEC filings in the RAG store.
+
+    Fast path (the common case): if the ticker already has stored filings we
+    return immediately and make NO network call. Only on a true cache miss do we
+    hit EDGAR. Any EDGAR / network failure is logged and swallowed — the pipeline
+    must still proceed (falling back to local PDFs or running degraded); a flaky
+    SEC API must NEVER fail the whole job. Returns the number of filings ingested
+    (0 if already present or on error). Forms / limit come from EDGAR_FORMS /
+    EDGAR_LIMIT (defaults 10-K,10-Q / 4)."""
+    ticker = ticker.upper()
+    try:
+        rag = FundamentalRAG()
+        if rag.get_available_filings(ticker):
+            return 0  # already have filings — no network call on the hot path
+    except Exception as e:  # noqa: BLE001 - DB hiccup shouldn't fail the run
+        print(f"⚠️  ensure_filings: could not check stored filings for {ticker}: {e}")
+        return 0
+
+    if progress_cb is not None:
+        try:
+            progress_cb("ingesting filings")
+        except Exception:  # noqa: BLE001
+            pass
+
+    forms = _env_forms()
+    limit = _env_limit()
+    raw_dir = os.getenv("FILINGS_RAW_DIR", "./data/filings_raw")
+    try:
+        n = ingest_tickers([ticker], forms=forms, limit=limit,
+                           raw_dir=raw_dir, max_chars=400_000, force=False)
+        print(f"📥 ensure_filings({ticker}): ingested {n} filing(s).")
+        return n
+    except Exception as e:  # noqa: BLE001 - EDGAR down must not crash the pipeline
+        print(f"⚠️  ensure_filings({ticker}): EDGAR ingest failed (continuing): {e}")
+        return 0
+
+
+def refresh_tracked_filings(tickers: List[str]) -> int:
+    """Weekly sweep: re-check each tracked ticker for NEW filings and ingest them.
+
+    Idempotency by accession number means only genuinely-new filings cost
+    embedding work; already-stored accessions are skipped cheaply. Per-ticker
+    failures are isolated by ingest_tickers' own try/except; this wrapper also
+    swallows any top-level error so a sweep can never kill the worker loop.
+    Returns the total number of new filings ingested."""
+    forms = _env_forms()
+    limit = _env_limit()
+    raw_dir = os.getenv("FILINGS_RAW_DIR", "./data/filings_raw")
+    clean = [t.strip().upper() for t in tickers if t and t.strip()]
+    if not clean:
+        return 0
+    try:
+        return ingest_tickers(clean, forms=forms, limit=limit,
+                              raw_dir=raw_dir, max_chars=400_000, force=False)
+    except Exception as e:  # noqa: BLE001
+        print(f"⚠️  refresh_tracked_filings: sweep failed: {e}")
+        return 0
 
 
 def main() -> int:

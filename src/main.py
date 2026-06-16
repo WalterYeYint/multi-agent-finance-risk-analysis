@@ -31,6 +31,8 @@ from agents import debate_sentiment_agent, debate_valuation_agent, debate_fundam
 from utils.schemas import DebateReport
 from utils.horizons import get_horizon
 from utils.snapshots import save_snapshot
+from utils.prices import fetch_price_series_polygon
+from utils.edgar_ingest import ensure_filings
 
 
 def build_chain_graph():
@@ -119,6 +121,12 @@ def run_pipeline_for_horizon(
     )
 
     t0 = time.time()
+    # Pre-flight: pull this ticker's SEC filings if we don't already have them,
+    # so the fundamental agent has something to ground on (on AWS there are no
+    # local PDFs). No-ops with no network call when filings are already stored,
+    # and degrades gracefully if EDGAR is unreachable.
+    ensure_filings(ticker, progress_cb=progress_cb)
+
     _progress("analyzing")
     final = State(**chain.invoke(state, config=RunnableConfig()))
 
@@ -131,11 +139,18 @@ def run_pipeline_for_horizon(
         final, config=RunnableConfig(recursion_limit=100)))
     latency_ms = int((time.time() - t0) * 1000)
 
+    # Fetch the daily-close price series from Polygon (NOT yfinance, which is
+    # IP-blocked on AWS) and persist it in the snapshot, so the request-path
+    # /api/price can read it from Postgres instead of calling Polygon live.
+    # We always fetch the full ~2y series — the backend slices it per horizon —
+    # and it degrades to [] gracefully when POLYGON_API_KEY is missing.
+    prices = fetch_price_series_polygon(ticker, years=2.0)
+
     snapshot_id: Optional[int] = None
     if persist:
         snapshot_id = save_snapshot(
             ticker=ticker, horizon=h.name, state=final,
-            latency_ms=latency_ms, cost_usd=None)
+            latency_ms=latency_ms, cost_usd=None, prices=prices)
     return final, snapshot_id
 
 

@@ -35,12 +35,16 @@ load_dotenv()
 
 from main import run_pipeline_for_horizon  # noqa: E402
 from utils.db import ensure_schema  # noqa: E402
+from utils.edgar_ingest import refresh_tracked_filings  # noqa: E402
 from utils.snapshots import (  # noqa: E402
-    claim_next_job, enqueue_stale_refreshes, update_job_status,
+    claim_next_job, enqueue_stale_refreshes, list_tracked_tickers,
+    update_job_status,
 )
 
 POLL_SECONDS = int(os.getenv("WORKER_POLL_SECONDS", "3"))
 REFRESH_SCAN_SECONDS = int(os.getenv("WORKER_REFRESH_SCAN_SECONDS", "300"))
+# Weekly sweep: re-check every tracked ticker for NEW SEC filings (default 7 days).
+FILING_SCAN_SECONDS = int(os.getenv("WORKER_FILING_SCAN_SECONDS", str(7 * 24 * 3600)))
 
 
 def process_job(job: dict) -> None:
@@ -65,8 +69,10 @@ def process_job(job: dict) -> None:
 def main() -> int:
     ensure_schema()
     print(f"🛠️  worker started (poll={POLL_SECONDS}s, "
-          f"refresh-scan={REFRESH_SCAN_SECONDS}s). Ctrl-C to stop.", flush=True)
+          f"refresh-scan={REFRESH_SCAN_SECONDS}s, "
+          f"filing-scan={FILING_SCAN_SECONDS}s). Ctrl-C to stop.", flush=True)
     last_scan = 0.0
+    last_filing_scan = 0.0
     try:
         while True:
             job = claim_next_job()
@@ -83,6 +89,17 @@ def main() -> int:
                 except Exception as e:  # noqa: BLE001
                     print(f"⚠️  stale-refresh scan failed: {e}", flush=True)
                 last_scan = now
+
+            if now - last_filing_scan >= FILING_SCAN_SECONDS:
+                try:
+                    tickers = [t["ticker"] for t in list_tracked_tickers()]
+                    if tickers:
+                        n = refresh_tracked_filings(tickers)
+                        print(f"📰 filing sweep: ingested {n} new filing(s) "
+                              f"across {len(tickers)} ticker(s)", flush=True)
+                except Exception as e:  # noqa: BLE001
+                    print(f"⚠️  filing sweep failed: {e}", flush=True)
+                last_filing_scan = now
 
             time.sleep(POLL_SECONDS)
     except KeyboardInterrupt:
