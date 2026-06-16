@@ -164,7 +164,16 @@ def connect(register_types: bool = True) -> "psycopg.Connection":
     precisely because it is the call that creates the extension.
     """
     try:
-        conn = psycopg.connect(get_conninfo())
+        # prepare_threshold=None disables psycopg3's automatic server-side
+        # prepared statements. Bulk ingestion fires hundreds of identical
+        # INSERTs, which would otherwise get promoted to prepared statements and
+        # then fail behind a transaction-mode connection pooler (Supabase's
+        # pooler on :6543, or any pgbouncer in transaction mode), which routes
+        # each query to a different backend that never saw the PREPARE — the
+        # symptom is "sending prepared query failed: SSL error: bad length" /
+        # "SSL SYSCALL error: EOF detected". Disabling auto-prepare is safe on a
+        # direct connection too, so this is unconditional.
+        conn = psycopg.connect(get_conninfo(), prepare_threshold=None)
     except psycopg.OperationalError as e:  # pragma: no cover - env dependent
         raise RuntimeError(
             f"Could not connect to Postgres at {get_conninfo()!r}. "

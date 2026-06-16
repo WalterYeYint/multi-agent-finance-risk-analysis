@@ -210,9 +210,17 @@ straight from the free SEC EDGAR API:
 python -m src.utils.edgar_ingest --tickers AAPL,MSFT,GOOGL --forms 10-K,10-Q --limit 4
 ```
 
-It is idempotent (filings already stored are skipped), so it is safe to re-run
-or schedule on a cron. Set `SEC_USER_AGENT` in `.env` to a real contact string
-(e.g. `"Your Name your-email@example.com"`) — SEC throttles requests without one.
+It is idempotent (filings already stored are skipped by accession number), so it
+is safe to re-run or schedule on a cron. Set `SEC_USER_AGENT` in `.env` to a real
+contact string (e.g. `"Your Name your-email@example.com"`) — SEC throttles
+requests without one.
+
+You usually don't need to run this manually: the **worker** now ingests filings
+automatically — on-demand the first time a ticker is analyzed (if it has none
+stored), and on a weekly sweep over all tracked tickers for newly-released
+filings. Both paths share `SEC_USER_AGENT` and the `EDGAR_FORMS` (default
+`10-K,10-Q`) / `EDGAR_LIMIT` (default `4`) / `WORKER_FILING_SCAN_SECONDS`
+(default `604800`, i.e. 7 days) tunables.
 
 **Option B — manual PDFs.** Store PDFs in the `data/filings` directory in
 `ticker-filing_type-filing_freq-filing_start_month-filing_end_month-filing_year.pdf`

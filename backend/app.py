@@ -258,6 +258,16 @@ def _resolve_snapshot(ticker: str, horizon):
     if cached and is_fresh(cached, horizon):
         return jsonify(_attach_pdf(_serialize_snapshot(cached, cached=True)))
 
+    # The TTL cache above can lag the worker by up to _SNAPSHOT_TTL_S. The moment
+    # a job finishes it stops blocking create_job's (queued|running) dedup, so a
+    # poll that lands in that lag window would see "no fresh snapshot, no in-flight
+    # job" and enqueue a DUPLICATE job (→ a second, redundant snapshot). Confirm
+    # against a fresh read before enqueuing — this only costs a DB roundtrip on
+    # the miss path, which is exactly where we were about to enqueue anyway.
+    fresh = get_latest_snapshot(ticker, horizon.name)
+    if fresh and is_fresh(fresh, horizon):
+        return jsonify(_attach_pdf(_serialize_snapshot(fresh, cached=True)))
+
     job = get_or_create_pending_job(ticker, horizon.name)
     return _job_response(job)
 
