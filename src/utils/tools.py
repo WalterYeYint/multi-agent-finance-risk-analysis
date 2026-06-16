@@ -1,5 +1,4 @@
 import pandas as pd
-import yfinance as yf
 import requests
 import json
 import re
@@ -32,21 +31,46 @@ except ImportError:
 
 @tool("get_price_history")
 def get_price_history(ticker: str, period: str = "1y", interval: str = "1d", end_date = None) -> str:
-    """Returns price history CSV for ticker using yfinance."""
+    """Returns daily price-history CSV (Date,Close columns) for `ticker`.
+
+    Sources prices from Polygon (the shared `utils.prices` helper), NOT yfinance:
+    yfinance pulls in curl_cffi (a native extension that crashes on AWS) and
+    Yahoo IP-blocks AWS datacenter ranges. `compute_valuation_metrics` and
+    `compute_risk` only consume the Date + Close columns, so a close-only series
+    is sufficient. Only daily bars are supported (interval is accepted for
+    backwards compatibility but the granularity is always 1 day).
+
+    Falls back to yfinance ONLY when Polygon returns nothing (e.g. no
+    POLYGON_API_KEY in a local/offline run) — imported lazily so the native
+    curl_cffi dependency is never loaded on the AWS happy path.
+    """
     start_date, end_date = period_to_datetime_range(period, end_date)
-    # Format dates for yfinance (YYYY-MM-DD)
     start_str = start_date.strftime('%Y-%m-%d')
     end_str = end_date.strftime('%Y-%m-%d')
-    
-    print(f"📊 Fetching {ticker} price data from {start_str} to {end_str}")
-    df = yf.download(ticker, start=start_str, end=end_str, interval=interval, 
-                    auto_adjust=False, progress=False)
+
+    print(f"📊 Fetching {ticker} price data from {start_str} to {end_str} (Polygon)")
+    from utils.prices import fetch_price_rows_polygon
+    rows = fetch_price_rows_polygon(ticker, start_date.date(), end_date.date())
+    if rows:
+        df = pd.DataFrame(rows).rename(columns={"date": "Date", "close": "Close"})
+        return df.to_csv(index=False)
+
+    # Polygon unavailable (no key / network failure / empty range). Fall back to
+    # yfinance for LOCAL use only; lazy import keeps curl_cffi off the AWS path.
+    print(f"⚠️  Polygon returned no data for {ticker}; trying yfinance fallback")
+    try:
+        import yfinance as yf
+    except Exception as e:  # noqa: BLE001
+        return f"ERROR: No data for {ticker} (Polygon empty, yfinance unavailable: {e})."
+
+    df = yf.download(ticker, start=start_str, end=end_str, interval=interval,
+                     auto_adjust=False, progress=False)
     if df.empty:
         return f"ERROR: No data for {ticker}."
-    
+
     # Reset index to make Date a column
     df = df.reset_index()
-    
+
     # Clean up column names - handle MultiIndex columns from yfinance
     if isinstance(df.columns, pd.MultiIndex):
         # Flatten MultiIndex columns and remove ticker prefixes
@@ -54,11 +78,11 @@ def get_price_history(ticker: str, period: str = "1y", interval: str = "1d", end
     else:
         # Handle regular columns with ticker prefixes
         df.columns = [col.replace(f"{ticker},", "").strip() if isinstance(col, str) else col for col in df.columns]
-    
+
     # Ensure Date column is properly formatted
     if 'Date' in df.columns:
         df["Date"] = pd.to_datetime(df["Date"]).dt.strftime("%Y-%m-%d")
-    
+
     return df.to_csv(index=False)
 
 @tool("get_recent_news")

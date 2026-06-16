@@ -35,9 +35,10 @@ PERIOD_TAIL = {"1mo": 22, "6mo": 124, "2y": None}
 _FULL_LOOKBACK_DAYS = 365 * 2 + 7
 
 
-def fetch_price_series_polygon(ticker: str, *, years: float = 2.0,
-                               api_key: Optional[str] = None) -> list[dict]:
-    """Daily close series for `ticker` from Polygon aggregates.
+def fetch_price_rows_polygon(ticker: str, start: date, end: date, *,
+                             api_key: Optional[str] = None) -> list[dict]:
+    """Daily close rows for `ticker` over the inclusive [start, end] date range
+    from Polygon aggregates.
 
     Returns a list of {"date": "YYYY-MM-DD", "close": float}, oldest first.
     Returns [] (never raises) on missing key / non-200 / network error so the
@@ -48,10 +49,8 @@ def fetch_price_series_polygon(ticker: str, *, years: float = 2.0,
         print("⚠️  price fetch: POLYGON_API_KEY not set — returning empty series")
         return []
 
-    today = date.today()
-    start = today - timedelta(days=int(365 * years) + 7)
     url = (f"https://api.polygon.io/v2/aggs/ticker/{ticker.upper()}"
-           f"/range/1/day/{start.isoformat()}/{today.isoformat()}")
+           f"/range/1/day/{start.isoformat()}/{end.isoformat()}")
     try:
         resp = requests.get(
             url,
@@ -79,6 +78,18 @@ def fetch_price_series_polygon(ticker: str, *, years: float = 2.0,
     except Exception as e:  # noqa: BLE001
         print(f"⚠️  price fetch failed for {ticker}: {e}")
         return []
+
+
+def fetch_price_series_polygon(ticker: str, *, years: float = 2.0,
+                               api_key: Optional[str] = None) -> list[dict]:
+    """Daily close series for `ticker` over the trailing `years`, from Polygon.
+
+    Thin wrapper over `fetch_price_rows_polygon` (today − years → today). Returns
+    a list of {"date": "YYYY-MM-DD", "close": float}, oldest first; [] on failure.
+    """
+    today = date.today()
+    start = today - timedelta(days=int(365 * years) + 7)
+    return fetch_price_rows_polygon(ticker, start, today, api_key=api_key)
 
 
 def slice_period(full: list[dict], period: str) -> list[dict]:
