@@ -66,12 +66,31 @@ def _headers() -> Dict[str, str]:
     return {"User-Agent": ua, "Accept-Encoding": "gzip, deflate"}
 
 
+class _TransientSecError(Exception):
+    """SEC returned 429 / 5xx — retryable (vs a permanent 4xx)."""
+
+
 def _get(url: str, *, as_json: bool = False, timeout: int = 30):
-    """GET with the SEC headers and a polite delay; returns json or text."""
-    time.sleep(SEC_RATE_LIMIT_SECONDS)
-    resp = requests.get(url, headers=_headers(), timeout=timeout)
-    resp.raise_for_status()
-    return resp.json() if as_json else resp.text
+    """GET with the SEC headers and a polite delay; returns json or text.
+
+    Transient failures (429, 5xx, connection drops, timeouts) are retried with
+    bounded backoff; permanent 4xx (e.g. 404) raise immediately and are left for
+    the caller (ensure_filings / ingest swallow them so a flaky SEC API never
+    fails a pipeline run).
+    """
+    from utils.retry import retry_call
+
+    def _do():
+        time.sleep(SEC_RATE_LIMIT_SECONDS)
+        resp = requests.get(url, headers=_headers(), timeout=timeout)
+        if resp.status_code == 429 or resp.status_code >= 500:
+            raise _TransientSecError(f"SEC {resp.status_code} for {url}")
+        resp.raise_for_status()
+        return resp.json() if as_json else resp.text
+
+    return retry_call(
+        _do, base_delay=1.0, label="sec-edgar",
+        retry_on=(_TransientSecError, requests.ConnectionError, requests.Timeout))
 
 
 # --------------------------------------------------------------------- lookup

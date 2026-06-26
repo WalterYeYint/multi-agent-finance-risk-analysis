@@ -75,7 +75,18 @@ def main() -> int:
     last_filing_scan = 0.0
     try:
         while True:
-            job = claim_next_job()
+            # claim_next_job() hits the DB; a transient failure here is OUTSIDE
+            # process_job's try/except, so guard it too — a pooler blip must not
+            # kill the worker loop. retry_call inside connect() already retries
+            # the connection; this is the last-resort backstop.
+            try:
+                job = claim_next_job()
+            except Exception as e:  # noqa: BLE001
+                print(f"⚠️  claim_next_job failed: {e}; backing off {POLL_SECONDS}s",
+                      flush=True)
+                time.sleep(POLL_SECONDS)
+                continue
+
             if job is not None:
                 process_job(job)
                 continue  # drain the queue before idling
