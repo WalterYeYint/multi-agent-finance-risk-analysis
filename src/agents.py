@@ -13,7 +13,7 @@ from utils.schemas import (
     SentimentSummary, SentimentExtract, ValuationMetrics,
     FundamentalAnalysis, FundamentalExtract, DebateReport
 )
-from utils.rag_utils import initialize_sample_data, FundamentalRAG, batch_ingest_documents
+from utils.rag_utils import FundamentalRAG
 from langgraph.prebuilt import create_react_agent
 
 from dotenv import load_dotenv
@@ -176,13 +176,17 @@ def fundamental_agent(state: State, config: RunnableConfig):
         end_year = end_date.year
         end_month = end_date.month
 
-    # Initialize RAG system to ensure sample data exists
+    # Filings come exclusively from SEC EDGAR (no local-PDF seed). The pipeline
+    # normally pulls them up front via ensure_filings(); this is a self-sufficiency
+    # net for when the agent is invoked directly. ensure_filings() no-ops (no
+    # network call) when filings are already stored, and swallows EDGAR/network
+    # errors so the agent still runs degraded rather than crashing.
     rag_system = FundamentalRAG()
     available_filings = rag_system.get_available_filings(state.ticker)
     if not available_filings:
-        print(f"No filings found for {state.ticker}, initializing sample data...")
-        # initialize_sample_data(rag_system)
-        batch_ingest_documents(rag_system, directory="./data/filings")
+        print(f"No filings stored for {state.ticker}; pulling from SEC EDGAR...")
+        from utils.edgar_ingest import ensure_filings
+        ensure_filings(state.ticker)
         available_filings = rag_system.get_available_filings(state.ticker)
     
     if not available_filings:

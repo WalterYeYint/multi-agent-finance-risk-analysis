@@ -165,13 +165,28 @@ class FundamentalRAG:
                             self.embedding_model, Jsonb(meta),
                         ))
 
-                    cur.executemany(
-                        """INSERT INTO filing_chunks
-                           (filing_id, ticker, chunk_index, content, embedding,
-                            embedding_model, metadata)
-                           VALUES (%s, %s, %s, %s, %s, %s, %s)""",
-                        rows,
-                    )
+                    # NB: do NOT use cur.executemany() here. psycopg3's
+                    # executemany() sends rows via libpq *pipeline mode*, which
+                    # the Supabase transaction-mode pooler (pgbouncer) does not
+                    # support — it drops the connection mid-batch ("Pipeline
+                    # [BAD]" / "SSL SYSCALL error: EOF detected"). Instead, insert
+                    # with single multi-row INSERT statements (one round-trip per
+                    # batch, no pipeline). Together with prepare_threshold=None on
+                    # the connection (see utils/db.py) this is fully pooler-safe.
+                    # Batch so the bound-parameter count (7 per row) stays well
+                    # under Postgres's 65535-params-per-statement limit.
+                    _cols = ("(filing_id, ticker, chunk_index, content, "
+                             "embedding, embedding_model, metadata)")
+                    _BATCH = 500
+                    for _i in range(0, len(rows), _BATCH):
+                        _batch = rows[_i:_i + _BATCH]
+                        _values = ", ".join(
+                            ["(%s, %s, %s, %s, %s, %s, %s)"] * len(_batch))
+                        _flat = [_v for _row in _batch for _v in _row]
+                        cur.execute(
+                            f"INSERT INTO filing_chunks {_cols} VALUES {_values}",
+                            _flat,
+                        )
                     # num_chunks is the total across all embedding models.
                     cur.execute(
                         "UPDATE filings SET num_chunks = "

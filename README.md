@@ -200,11 +200,9 @@ npm start
 
 ## Saving 10K/10Q Documents
 
-There are two ways to add filings to the RAG store (Postgres + pgvector — make
-sure the database is running, see installation step 4).
-
-**Option A — auto-ingest from SEC EDGAR (recommended).** Downloads filings
-straight from the free SEC EDGAR API:
+Filings are added to the RAG store (Postgres + pgvector — make sure the database
+is running, see installation step 4) **exclusively from SEC EDGAR**. Downloads
+filings straight from the free SEC EDGAR API:
 
 ```bash
 python -m src.utils.edgar_ingest --tickers AAPL,MSFT,GOOGL --forms 10-K,10-Q --limit 4
@@ -222,10 +220,10 @@ filings. Both paths share `SEC_USER_AGENT` and the `EDGAR_FORMS` (default
 `10-K,10-Q`) / `EDGAR_LIMIT` (default `4`) / `WORKER_FILING_SCAN_SECONDS`
 (default `604800`, i.e. 7 days) tunables.
 
-**Option B — manual PDFs.** Store PDFs in the `data/filings` directory in
-`ticker-filing_type-filing_freq-filing_start_month-filing_end_month-filing_year.pdf`
-format, e.g. `AAPL-10Q-Q3-4-6-2025.pdf`. They are ingested automatically the
-first time a ticker with no stored filings is analyzed.
+Extracted filing text is archived under `data/filings_raw/` at runtime
+(configurable via `FILINGS_RAW_DIR`); that folder is gitignored and regenerated
+on each ingest, and retrieval always reads from Postgres regardless. There is no
+local-PDF seed — drop-a-PDF ingestion has been retired in favour of EDGAR.
 
 ## Running Integration Test
 Integration test can be run to verify how accurate the system's recommendations are.
@@ -287,7 +285,7 @@ The system includes a sophisticated Fundamental Analysis Agent that uses RAG (Re
 ### Quick Start with Sample Data
 
 ```bash
-# Run analysis (will create a chroma DB with data from ./data/filings folder)
+# Run analysis (pulls filings from SEC EDGAR on demand, stores chunks in Postgres)
 python -m src.main
 ```
 

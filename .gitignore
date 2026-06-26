@@ -33,3 +33,8 @@ __pycache__/
 # DB
 data/chroma_db
 *.bin
+
+# Filings: sourced exclusively from SEC EDGAR at runtime. filings_raw is the
+# EDGAR text archive (regenerated on ingest); filings (local PDF seed) is retired.
+data/filings/
+data/filings_raw/
