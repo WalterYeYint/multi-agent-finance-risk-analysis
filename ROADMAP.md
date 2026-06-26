@@ -43,17 +43,18 @@ correctness fixes are already in the working tree; Day 1 commits them as a
 baseline, then this sprint closes the remaining robustness/quality gaps from the
 backlog so Sprint 2 deploys a solid tree. ~6 hrs/day, **~30 hrs total**.
 
-### Day 1 (2026-06-26) — Baseline + failure handling (#5)
-- [ ] Commit the already-done fixes (Polygon price source, prices-in-snapshot,
-      EDGAR-only ingest + data-folder removal, SSL `prepare_threshold` +
-      `executemany`→multi-row INSERT, dedup-race fix) as the baseline branch.
-- [ ] Add bounded retry/backoff + timeouts to transient external calls (LLM,
-      Polygon, EDGAR, DB connect); every external call gets a timeout + graceful
-      fallback.
-- [ ] Surface job failures: write the error detail + terminal `failed` status into
-      `jobs` so the poller/UI sees a real failure, not a hang. Ensure no exception
-      escapes `process_job` and kills the worker loop.
-- **Exit:** a forced provider outage degrades gracefully; failed jobs report a reason.
+### Day 1 (2026-06-26) — Baseline + failure handling (#5) ✅
+- [x] Baseline already committed (the earlier fixes landed in commits
+      `e6019344`/`c799b508`/`c869b9f3`/`54386ae6`).
+- [x] Bounded retry/backoff + timeouts on transient external calls — new
+      `utils/retry.py` (`retry_call`/`with_retry`), applied to DB `connect()`
+      (retry `OperationalError`), Polygon `fetch_price_rows_polygon` (retry
+      429/5xx, then graceful `[]`), EDGAR `_get` (retry 429/5xx/conn/timeout, not
+      permanent 4xx), and `LLM_MAX_RETRIES` on the OpenAI/Anthropic/Google LLMs.
+- [x] Job-failure surfacing — `process_job` already writes `failed` + `error` to
+      `jobs`; hardened the worker loop so a transient `claim_next_job()` error
+      backs off instead of crashing the loop.
+- **Exit:** a forced provider outage degrades gracefully; failed jobs report a reason. ✅
 
 ### Day 2 (2026-06-27) — Input validation & API robustness (#9 partial)
 - [ ] Validate/sanitize ticker (uppercase, regex, length) — reject garbage with a

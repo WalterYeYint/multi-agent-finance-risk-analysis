@@ -70,25 +70,28 @@ def get_llm(temperature: float = 0.1, model_provider: str = "auto", max_tokens=1
                 # model="gpt-3.5-turbo",  # Cost-effective option
                 model="gpt-4o",
                 temperature=temperature,
-                max_tokens=max_tokens
+                max_tokens=max_tokens,
+                max_retries=int(os.getenv("LLM_MAX_RETRIES", "3")),
             )
-        
+
         # Check for Anthropic API key
         elif os.getenv("ANTHROPIC_API_KEY") and ChatAnthropic:
             print("🤖 Using Anthropic Claude models")
             return ChatAnthropic(
                 model="claude-3-haiku-20240307",  # Fast and cost-effective
                 temperature=temperature,
-                max_tokens=max_tokens
+                max_tokens=max_tokens,
+                max_retries=int(os.getenv("LLM_MAX_RETRIES", "3")),
             )
-        
+
         # Check for Google API key
         elif os.getenv("GOOGLE_API_KEY") and ChatGoogleGenerativeAI:
             print("🤖 Using Google Gemini models")
             return ChatGoogleGenerativeAI(
                 model="gemini-pro",
                 temperature=temperature,
-                max_output_tokens=max_tokens
+                max_output_tokens=max_tokens,
+                max_retries=int(os.getenv("LLM_MAX_RETRIES", "3")),
             )
 
         # Check for local Ollama installation
@@ -123,23 +126,26 @@ def get_llm(temperature: float = 0.1, model_provider: str = "auto", max_tokens=1
         return ChatOpenAI(
             model="gpt-4o",  # Primary target model
             temperature=temperature,
-            max_tokens=max_tokens
+            max_tokens=max_tokens,
+            max_retries=int(os.getenv("LLM_MAX_RETRIES", "3")),
         )
-    
+
     elif model_provider == "anthropic" and os.getenv("ANTHROPIC_API_KEY") and ChatAnthropic:
         print("🤖 Using Anthropic Claude models")
         return ChatAnthropic(
             model="claude-3-haiku-20240307",
             temperature=temperature,
-            max_tokens=max_tokens
+            max_tokens=max_tokens,
+            max_retries=int(os.getenv("LLM_MAX_RETRIES", "3")),
         )
-    
+
     elif model_provider == "google" and os.getenv("GOOGLE_API_KEY") and ChatGoogleGenerativeAI:
         print("🤖 Using Google Gemini models")
         return ChatGoogleGenerativeAI(
             model="gemini-pro",
             temperature=temperature,
-            max_output_tokens=max_tokens
+            max_output_tokens=max_tokens,
+            max_retries=int(os.getenv("LLM_MAX_RETRIES", "3")),
         )
     
     elif model_provider == "ollama" and ChatOllama:

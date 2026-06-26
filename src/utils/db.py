@@ -163,6 +163,7 @@ def connect(register_types: bool = True) -> "psycopg.Connection":
     must have run first. ensure_schema() itself connects with register_types=False
     precisely because it is the call that creates the extension.
     """
+    from utils.retry import retry_call
     try:
         # prepare_threshold=None disables psycopg3's automatic server-side
         # prepared statements. Bulk ingestion fires hundreds of identical
@@ -173,7 +174,12 @@ def connect(register_types: bool = True) -> "psycopg.Connection":
         # symptom is "sending prepared query failed: SSL error: bad length" /
         # "SSL SYSCALL error: EOF detected". Disabling auto-prepare is safe on a
         # direct connection too, so this is unconditional.
-        conn = psycopg.connect(get_conninfo(), prepare_threshold=None)
+        #
+        # Retry transient connection failures (pooler blips, brief network
+        # drops) with bounded backoff before giving up.
+        conn = retry_call(
+            lambda: psycopg.connect(get_conninfo(), prepare_threshold=None),
+            retry_on=(psycopg.OperationalError,), max_delay=4.0, label="db-connect")
     except psycopg.OperationalError as e:  # pragma: no cover - env dependent
         raise RuntimeError(
             f"Could not connect to Postgres at {get_conninfo()!r}. "

@@ -51,12 +51,24 @@ def fetch_price_rows_polygon(ticker: str, start: date, end: date, *,
 
     url = (f"https://api.polygon.io/v2/aggs/ticker/{ticker.upper()}"
            f"/range/1/day/{start.isoformat()}/{end.isoformat()}")
-    try:
+
+    def _do_request():
         resp = requests.get(
             url,
             params={"adjusted": "true", "sort": "asc", "limit": 50000, "apiKey": api_key},
             timeout=10,
         )
+        # Treat rate-limit / server errors as transient so retry_call backs off
+        # and retries; 4xx (other than 429) are permanent and returned as-is.
+        if resp.status_code in (429, 500, 502, 503, 504):
+            raise requests.HTTPError(f"Polygon {resp.status_code}", response=resp)
+        return resp
+
+    try:
+        from utils.retry import retry_call
+        resp = retry_call(
+            _do_request, retry_on=(requests.RequestException,),
+            base_delay=1.0, label=f"polygon:{ticker}")
         if resp.status_code != 200:
             print(f"⚠️  price fetch: Polygon {resp.status_code} for {ticker}: {resp.text[:200]}")
             return []
