@@ -19,7 +19,7 @@ from utils.horizons import get_horizon, HORIZONS
 from utils.snapshots import (
     get_latest_snapshot, is_fresh, list_snapshot_history, list_tracked_tickers,
     list_latest_snapshots_overview, get_or_create_pending_job, get_job,
-    get_latest_prices,
+    get_latest_prices, _sanitize_for_json,
 )
 from utils.prices import fetch_price_series_polygon, slice_period, PERIOD_TAIL
 
@@ -30,6 +30,67 @@ from cachetools import TTLCache, cached
 
 app = Flask(__name__)
 CORS(app)
+
+
+# --- Robustness: every response is valid JSON, every error is JSON ----------
+
+from flask.json.provider import DefaultJSONProvider  # noqa: E402
+from werkzeug.exceptions import HTTPException  # noqa: E402
+
+
+class _SafeJSONProvider(DefaultJSONProvider):
+    """Sanitize NaN / Infinity to null on EVERY response.
+
+    Python's json emits those as bare `NaN`/`Infinity` tokens (invalid per
+    RFC 8259), which makes the frontend's JSON.parse throw. Snapshots are already
+    sanitized at write time, but a computed value (cumulative_return, a price,
+    a metric) can still go non-finite on the serve path — this guarantees no
+    endpoint can ever emit invalid JSON, regardless of what produced the value.
+    """
+    def dumps(self, obj, **kwargs):
+        return super().dumps(_sanitize_for_json(obj), **kwargs)
+
+
+app.json = _SafeJSONProvider(app)
+
+
+@app.errorhandler(HTTPException)
+def _handle_http_exception(e):
+    """Return a JSON body for 404/405/400/etc. instead of Werkzeug's HTML page,
+    so the SPA always gets parseable JSON."""
+    return jsonify({'error': e.description, 'status': e.code}), e.code
+
+
+@app.errorhandler(Exception)
+def _handle_unexpected(e):
+    """Last-resort net: any uncaught exception becomes a JSON 500 (no stack
+    trace leaked to the client; the full traceback is logged server-side)."""
+    app.logger.error("Unhandled error on %s: %s\n%s",
+                     request.path, e, traceback.format_exc())
+    return jsonify({'error': 'Internal server error'}), 500
+
+
+# Tickers: 1–10 chars, start with a letter, then letters/digits/./- (covers
+# BRK.B, BRK-B, RDS.A, etc.). Anything else (spaces, quotes, ';', unicode,
+# over-long strings) is rejected before it can reach the DB or pipeline.
+_TICKER_RE = re.compile(r'^[A-Z][A-Z0-9.\-]{0,9}$')
+
+
+def _clean_ticker(raw):
+    """Return (ticker, None) on success, else (None, (json_response, 400)).
+
+    Uppercases + strips, then enforces the symbol shape so garbage never gets
+    enqueued as a doomed job and injection-y strings are rejected outright.
+    """
+    t = str(raw or '').strip().upper()
+    if not t:
+        return None, (jsonify({'error': 'Missing required field: ticker'}), 400)
+    if not _TICKER_RE.match(t):
+        return None, (jsonify({
+            'error': f'Invalid ticker {t!r}: expected 1–10 characters '
+                     '(letters, digits, . or -) starting with a letter.'
+        }), 400)
+    return t, None
 
 
 def _detect_model_provider():
@@ -285,10 +346,10 @@ def analyze_stock():
     """Cache-or-compute a snapshot for {ticker, horizon}. `horizon` defaults to
     MID; the legacy period/interval/horizon_days fields are ignored."""
     try:
-        data = request.get_json() or {}
-        ticker = str(data.get('ticker', '')).strip().upper()
-        if not ticker:
-            return jsonify({'error': 'Missing required field: ticker'}), 400
+        data = request.get_json(silent=True) or {}
+        ticker, err = _clean_ticker(data.get('ticker'))
+        if err:
+            return err
         horizon, err = _parse_horizon(str(data.get('horizon', 'MID')))
         if err:
             return err
@@ -308,10 +369,13 @@ def analyze_stock():
 def get_snapshot(ticker, horizon):
     """Read (or compute on miss) the snapshot for one ticker + horizon."""
     try:
+        tkr, err = _clean_ticker(ticker)
+        if err:
+            return err
         h, err = _parse_horizon(horizon)
         if err:
             return err
-        return _resolve_snapshot(ticker.strip().upper(), h)
+        return _resolve_snapshot(tkr, h)
     except Exception as e:
         print(traceback.format_exc())
         return jsonify({'error': f'Snapshot failed: {str(e)}'}), 500
@@ -320,14 +384,17 @@ def get_snapshot(ticker, horizon):
 @app.route('/api/snapshot/<ticker>/<horizon>/history', methods=['GET'])
 def snapshot_history(ticker, horizon):
     """Timeseries of past snapshots for the run/risk-history view."""
+    tkr, err = _clean_ticker(ticker)
+    if err:
+        return err
     h, err = _parse_horizon(horizon)
     if err:
         return err
     try:
-        days = int(request.args.get('days', 90))
-    except ValueError:
+        days = max(1, min(int(request.args.get('days', 90)), 365))
+    except (ValueError, TypeError):
         days = 90
-    rows = _cached_snapshot_history(ticker.strip().upper(), h.name, days)
+    rows = _cached_snapshot_history(tkr, h.name, days)
     history = [
         {
             'generated_at': r['generated_at'].isoformat() if r.get('generated_at') else None,
@@ -339,7 +406,7 @@ def snapshot_history(ticker, horizon):
         }
         for r in rows
     ]
-    return jsonify({'ticker': ticker.strip().upper(), 'horizon': h.name, 'history': history})
+    return jsonify({'ticker': tkr, 'horizon': h.name, 'history': history})
 
 
 _VALID_PRICE_PERIODS = {"1mo", "6mo", "2y"}
@@ -349,12 +416,15 @@ _VALID_PRICE_PERIODS = {"1mo", "6mo", "2y"}
 def price_series(ticker):
     """Daily close prices for one of the three horizon lookback windows.
     Used by the price chart on the TickerView. Server-cached for 15 min."""
+    tkr, err = _clean_ticker(ticker)
+    if err:
+        return err
     period = (request.args.get('period') or '1mo').strip().lower()
     if period not in _VALID_PRICE_PERIODS:
         return jsonify({'error': f"period must be one of {sorted(_VALID_PRICE_PERIODS)}"}), 400
-    series = _cached_price_series(ticker.strip().upper(), period)
+    series = _cached_price_series(tkr, period)
     return jsonify({
-        'ticker': ticker.strip().upper(),
+        'ticker': tkr,
         'period': period,
         'series': series,
     })
