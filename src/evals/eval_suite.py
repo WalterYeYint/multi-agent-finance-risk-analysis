@@ -44,6 +44,7 @@ from main import build_chain_graph, build_final_recommendation_graph  # noqa: E4
 from utils.config import get_llm  # noqa: E402
 from utils.rag_utils import FundamentalRAG  # noqa: E402
 from utils.schemas import DebateReport  # noqa: E402
+from utils.grounding import grounding_report  # noqa: E402
 
 # The queries the fundamental agent feeds query_10k_documents — reused here so
 # eval (b) compares against a representative slice of the ticker's filings.
@@ -52,7 +53,6 @@ STANDARD_QUERIES = [
     "competitive position", "growth prospects", "investment thesis",
     "concerns and risks",
 ]
-_NUM_RE = re.compile(r"\d[\d,]*\.?\d*")
 
 
 # --------------------------------------------------------------------- run it
@@ -86,35 +86,19 @@ def _fundamental_populated(f) -> bool:
 
 
 # ----------------------------------------------------------------- metric (b)
-def _numbers(text: str) -> set[str]:
-    """Numeric tokens, comma-stripped (e.g. '1,234.5' -> '1234.5')."""
-    return {m.group(0).replace(",", "") for m in _NUM_RE.finditer(text or "")}
-
-
 def number_grounding(fundamental, ticker: str) -> tuple[int, int]:
     """Return (grounded, total): how many numbers in the fundamental analysis
-    also appear in the ticker's retrieved filing chunks."""
+    also appear in the ticker's retrieved filing chunks. The number logic is the
+    shared `grounding_report`; the source here is the top-k retrieved slice."""
     if fundamental is None:
         return 0, 0
-    fields = [
-        fundamental.executive_summary, fundamental.competitive_position,
-        fundamental.growth_prospects, fundamental.investment_thesis,
-        *fundamental.key_financial_metrics, *fundamental.business_highlights,
-        *fundamental.risk_factors, *fundamental.concerns_and_risks,
-    ]
-    output_numbers = _numbers(" ".join(str(x) for x in fields))
-    if not output_numbers:
-        return 0, 0
-
     rag = FundamentalRAG()
     chunk_lists = rag.retrieve_relevant_chunks_batch(
         ticker, STANDARD_QUERIES, from_date=date(2000, 1, 1), to_date=date.today())
     source = " ".join(
-        doc.page_content for chunks in chunk_lists for doc in chunks
-    ).replace(",", "")
-
-    grounded = sum(1 for n in output_numbers if n in source)
-    return grounded, len(output_numbers)
+        doc.page_content for chunks in chunk_lists for doc in chunks)
+    r = grounding_report(fundamental, source)
+    return r.grounded, r.total
 
 
 # ----------------------------------------------------------------- metric (c)
