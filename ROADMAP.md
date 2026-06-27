@@ -85,13 +85,21 @@ backlog so Sprint 2 deploys a solid tree. ~6 hrs/day, **~30 hrs total**.
 - **Exit:** batching + date-filter + grounding unit-verified (9 tests green);
       grounding mismatches are logged per run. Live load stress → Day 9. ✅
 
-### Day 4 (2026-06-29) — Concurrency, DB hygiene & UX (#6, #8)
-- [ ] Settle DB connection discipline (per-call vs a small pool); confirm 2 workers
-      run safely side-by-side (`claim_next_job` `SKIP LOCKED`).
-- [ ] Re-verify the dedup-race fix + cache correctness under concurrent polling.
-- [ ] Frontend: a clear failed-job state (not an infinite spinner). Stretch:
-      LLM-synthesize the debate section in the writer instead of the fixed template.
-- **Exit:** concurrent workers + pollers behave; a failed job renders as failed in the UI.
+### Day 4 (2026-06-29) — Concurrency, DB hygiene & UX (#6, #8) ✅
+- [x] DB connection discipline settled + documented in `connect()`: per-call
+      short-lived connections, **no app-side pool** (delegated to the managed
+      pgbouncer/RDS-Proxy in front). Multi-worker safety rests on
+      `claim_next_job`'s `FOR UPDATE SKIP LOCKED` — asserted by test.
+- [x] Dedup-race + cache-lock guarantees pinned by structural tests
+      (`ON CONFLICT DO NOTHING`, `jobs_pending_uniq` partial index, cache `Lock`).
+- [x] **Failed-job state** (no more infinite spinner): backend surfaces a recent
+      `failed` job instead of re-enqueuing it forever (`get_latest_job`;
+      `?retry=1`/`retry` forces a fresh job). Frontend `useAllSnapshots` stops
+      polling on `failed`, `TickerView` renders the error + **Retry** button,
+      `HorizonSummaryStrip` shows a Failed badge. Stretch (LLM writer synthesis)
+      intentionally skipped — bigger #8 change, out of Day 4 scope.
+- **Exit:** verified — 6 tests (concurrency primitives + failed-surfacing/retry);
+      frontend builds clean (CI=true). A failed job renders as failed with Retry. ✅
 
 ### Day 5 (2026-06-30) — Tests + local full-run regression (#4)
 - [ ] Unit/integration tests for every fix above + the earlier ones (`ensure_filings`

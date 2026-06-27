@@ -19,7 +19,7 @@ from utils.horizons import get_horizon, HORIZONS
 from utils.snapshots import (
     get_latest_snapshot, is_fresh, list_snapshot_history, list_tracked_tickers,
     list_latest_snapshots_overview, get_or_create_pending_job, get_job,
-    get_latest_prices, _sanitize_for_json,
+    get_latest_job, get_latest_prices, _sanitize_for_json,
 )
 from utils.prices import fetch_price_series_polygon, slice_period, PERIOD_TAIL
 
@@ -311,10 +311,11 @@ def _cached_price_series(ticker: str, period: str):
     return slice_period(full or [], period)
 
 
-def _resolve_snapshot(ticker: str, horizon):
+def _resolve_snapshot(ticker: str, horizon, *, force: bool = False):
     """Cache-or-enqueue. Fresh cache → 200 + snapshot. Otherwise enqueue a job
     (deduped per ticker+horizon) for the worker and return 202 + job info; the
-    client polls this same endpoint until the snapshot is fresh."""
+    client polls this same endpoint until the snapshot is fresh. `force=True`
+    (client retry) re-enqueues even past a recent failure."""
     cached = _cached_latest_snapshot(ticker, horizon.name)
     if cached and is_fresh(cached, horizon):
         return jsonify(_attach_pdf(_serialize_snapshot(cached, cached=True)))
@@ -328,6 +329,16 @@ def _resolve_snapshot(ticker: str, horizon):
     fresh = get_latest_snapshot(ticker, horizon.name)
     if fresh and is_fresh(fresh, horizon):
         return jsonify(_attach_pdf(_serialize_snapshot(fresh, cached=True)))
+
+    # Surface a recent failure instead of re-enqueuing it forever. A failed job
+    # is terminal (it no longer blocks create_job's dedup), so without this the
+    # next poll would silently start a fresh job and the client would spin
+    # indefinitely, never seeing the failure. The client retries explicitly
+    # (?retry=1 → force=True), which bypasses this and enqueues a new job.
+    if not force:
+        latest = get_latest_job(ticker, horizon.name)
+        if latest and latest['status'] == 'failed':
+            return _job_response(latest)
 
     job = get_or_create_pending_job(ticker, horizon.name)
     return _job_response(job)
@@ -353,7 +364,9 @@ def analyze_stock():
         horizon, err = _parse_horizon(str(data.get('horizon', 'MID')))
         if err:
             return err
-        return _resolve_snapshot(ticker, horizon)
+        force = str(data.get('retry') or request.args.get('retry') or '').lower() \
+            in ('1', 'true', 'yes')
+        return _resolve_snapshot(ticker, horizon, force=force)
     except openai.AuthenticationError:
         return jsonify({'error': 'OpenAI authentication failed. Set a valid OPENAI_API_KEY.'}), 502
     except openai.OpenAIError as e:
@@ -375,7 +388,8 @@ def get_snapshot(ticker, horizon):
         h, err = _parse_horizon(horizon)
         if err:
             return err
-        return _resolve_snapshot(tkr, h)
+        force = (request.args.get('retry') or '').strip().lower() in ('1', 'true', 'yes')
+        return _resolve_snapshot(tkr, h, force=force)
     except Exception as e:
         print(traceback.format_exc())
         return jsonify({'error': f'Snapshot failed: {str(e)}'}), 500

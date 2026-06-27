@@ -1,4 +1,4 @@
-import { useEffect, useState } from 'react';
+import { useEffect, useState, useRef, useCallback } from 'react';
 import axios from 'axios';
 
 const HORIZONS = ['SHORT', 'MID', 'LONG'];
@@ -10,19 +10,26 @@ const HORIZONS = ['SHORT', 'MID', 'LONG'];
  *
  *   {
  *     byHorizon: {
- *       SHORT: { snapshot, pending, error, status },
- *       MID:   { snapshot, pending, error, status },
- *       LONG:  { snapshot, pending, error, status },
+ *       SHORT: { snapshot, pending, error, job, status },
+ *       MID:   { ... },
+ *       LONG:  { ... },
  *     },
  *     allReady: boolean,
+ *     retry: (horizon) => void,   // re-run a failed horizon
  *   }
  *
- * `status` is one of: 'loading' | 'ready' | 'pending' | 'error'.
- * Each horizon resolves independently; the UI can render a ready horizon
- * immediately even while the other two are still being computed.
+ * `status` is one of: 'loading' | 'ready' | 'pending' | 'failed' | 'error'.
+ *   - 'failed' = the worker ran the job and it failed (job.error explains why);
+ *     polling stops so the user sees the failure instead of a perpetual spinner,
+ *     and `retry(horizon)` re-enqueues a fresh job.
+ *   - 'error'  = the request itself failed (network / unexpected backend error).
  */
 export function useAllSnapshots(ticker, { intervalMs = 3000 } = {}) {
   const [byHorizon, setByHorizon] = useState(() => initialState());
+  // pollOne lives inside the effect (closes over the live cancelled flag +
+  // timers); expose the current one via a ref so retry() can re-trigger a
+  // single horizon without resetting the other two.
+  const pollRef = useRef(null);
 
   useEffect(() => {
     if (!ticker) return undefined;
@@ -31,36 +38,48 @@ export function useAllSnapshots(ticker, { intervalMs = 3000 } = {}) {
 
     setByHorizon(initialState());
 
-    const pollOne = async (horizon) => {
+    const pollOne = async (horizon, force = false) => {
       try {
-        const res = await axios.get(
-          `/api/snapshot/${encodeURIComponent(ticker)}/${encodeURIComponent(horizon)}`,
-          { validateStatus: (s) => s === 200 || s === 202 },
-        );
+        const url =
+          `/api/snapshot/${encodeURIComponent(ticker)}/${encodeURIComponent(horizon)}` +
+          (force ? '?retry=1' : '');
+        const res = await axios.get(url, { validateStatus: (s) => s === 200 || s === 202 });
         if (cancelled) return;
         if (res.status === 200) {
           setByHorizon((prev) => ({
             ...prev,
-            [horizon]: { snapshot: res.data, pending: null, error: null, status: 'ready' },
+            [horizon]: { snapshot: res.data, pending: null, error: null, job: null, status: 'ready' },
           }));
-        } else {
+          return;
+        }
+        // 202: a job payload. A terminal 'failed' job stops the loop.
+        if (res.data?.status === 'failed') {
           setByHorizon((prev) => ({
             ...prev,
-            [horizon]: { snapshot: null, pending: res.data, error: null, status: 'pending' },
+            [horizon]: {
+              snapshot: null, pending: null, job: res.data,
+              error: res.data?.error || 'Analysis failed.', status: 'failed',
+            },
           }));
-          timers[horizon] = setTimeout(() => pollOne(horizon), intervalMs);
+          return;
         }
+        setByHorizon((prev) => ({
+          ...prev,
+          [horizon]: { snapshot: null, pending: res.data, error: null, job: null, status: 'pending' },
+        }));
+        timers[horizon] = setTimeout(() => pollOne(horizon), intervalMs);
       } catch (e) {
         if (cancelled) return;
         const msg = e?.response?.data?.error || e.message || 'Snapshot fetch failed';
         setByHorizon((prev) => ({
           ...prev,
-          [horizon]: { snapshot: null, pending: null, error: msg, status: 'error' },
+          [horizon]: { snapshot: null, pending: null, error: msg, job: null, status: 'error' },
         }));
       }
     };
 
-    HORIZONS.forEach(pollOne);
+    pollRef.current = pollOne;
+    HORIZONS.forEach((h) => pollOne(h));
 
     return () => {
       cancelled = true;
@@ -68,18 +87,20 @@ export function useAllSnapshots(ticker, { intervalMs = 3000 } = {}) {
     };
   }, [ticker, intervalMs]);
 
+  const retry = useCallback((horizon) => {
+    if (!pollRef.current) return;
+    setByHorizon((prev) => ({ ...prev, [horizon]: emptyState() }));
+    pollRef.current(horizon, true); // force=true → backend enqueues past the failure
+  }, []);
+
   const allReady = HORIZONS.every((h) => byHorizon[h].status === 'ready');
-  return { byHorizon, allReady };
+  return { byHorizon, allReady, retry };
 }
 
 function initialState() {
-  return {
-    SHORT: emptyState(),
-    MID: emptyState(),
-    LONG: emptyState(),
-  };
+  return { SHORT: emptyState(), MID: emptyState(), LONG: emptyState() };
 }
 
 function emptyState() {
-  return { snapshot: null, pending: null, error: null, status: 'loading' };
+  return { snapshot: null, pending: null, error: null, job: null, status: 'loading' };
 }
