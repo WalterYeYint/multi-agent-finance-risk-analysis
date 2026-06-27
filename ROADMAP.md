@@ -56,14 +56,17 @@ backlog so Sprint 2 deploys a solid tree. ~6 hrs/day, **~30 hrs total**.
       backs off instead of crashing the loop.
 - **Exit:** a forced provider outage degrades gracefully; failed jobs report a reason. ✅
 
-### Day 2 (2026-06-27) — Input validation & API robustness (#9 partial)
-- [ ] Validate/sanitize ticker (uppercase, regex, length) — reject garbage with a
-      clean 400 instead of enqueuing a doomed job.
-- [ ] Harden horizon parsing + every `/api/*` endpoint against bad/empty input;
-      guarantee well-formed JSON on the error path.
-- [ ] Audit NaN/Inf handling across price + snapshot serialization (extend
-      `_sanitize_for_json` coverage).
-- **Exit:** no endpoint 500s on malformed input; bad tickers fail fast and clearly.
+### Day 2 (2026-06-27) — Input validation & API robustness (#9 partial) ✅
+- [x] `_clean_ticker()` — uppercases/strips + regex (`^[A-Z][A-Z0-9.\-]{0,9}$`,
+      covers BRK.B/BRK-B); rejects garbage/injection/over-long with a clean 400
+      before any DB/pipeline work. Applied to analyze, snapshot, history, price.
+- [x] JSON on every error path — `HTTPException` handler (404/405/400→JSON, not
+      Werkzeug HTML) + catch-all `Exception` handler (→ JSON 500, no stack leak);
+      `get_json(silent=True)`; clamped `days` (1–365) in history.
+- [x] NaN/Inf safe app-wide — `_SafeJSONProvider` runs `_sanitize_for_json` on
+      every response, so no endpoint can emit invalid JSON regardless of the value.
+- **Exit:** verified via test client — malformed input → clean 400/404 JSON;
+      NaN/Inf → `null`. ✅
 
 ### Day 3 (2026-06-28) — RAG / ingestion correctness (#7 light)
 - [ ] Stress the new multi-row chunk INSERT on a large 10-K (hundreds of chunks);
