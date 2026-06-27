@@ -21,7 +21,7 @@ function TickerView() {
   const upperTicker = (ticker || '').toUpperCase();
   // Eager: fan out to all three horizons at once. The user sees a ready horizon
   // immediately even while the other two are still being computed.
-  const { byHorizon } = useAllSnapshots(upperTicker);
+  const { byHorizon, retry } = useAllSnapshots(upperTicker);
   const active = byHorizon[horizon];
 
   const setHorizon = (h) => {
@@ -55,6 +55,15 @@ function TickerView() {
         )}
         {active.status === 'loading' && (
           <div className="landing__muted">Loading {horizon} snapshot…</div>
+        )}
+        {active.status === 'failed' && (
+          <div className="snapshot__failed">
+            <div className="snapshot__failed-title">Analysis failed for {horizon}</div>
+            <div className="snapshot__failed-msg">{active.error}</div>
+            <button type="button" className="snapshot__retry" onClick={() => retry(horizon)}>
+              Retry
+            </button>
+          </div>
         )}
         {active.status === 'pending' && <PendingView pending={active.pending} />}
         {active.status === 'ready' && <SnapshotView snapshot={active.snapshot} />}

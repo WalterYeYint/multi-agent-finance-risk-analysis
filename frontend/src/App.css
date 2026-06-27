@@ -290,6 +290,12 @@ h1, h2, h3, h4 { margin: 0; font-weight: 600; color: var(--text-primary); }
 .snapshot__markdown table th, .snapshot__markdown table td { border: 1px solid var(--border); padding: 4px 8px; }
 .snapshot__error { background: rgba(220, 38, 38, 0.08); border: 1px solid rgba(220, 38, 38, 0.3); color: var(--danger); padding: 12px 14px; border-radius: var(--radius); }
 
+.snapshot__failed { background: rgba(220, 38, 38, 0.08); border: 1px solid rgba(220, 38, 38, 0.3); padding: 18px 16px; border-radius: var(--radius); text-align: center; }
+.snapshot__failed-title { color: var(--danger); font-weight: 600; margin-bottom: 6px; }
+.snapshot__failed-msg { color: var(--muted); font-size: 0.9rem; word-break: break-word; margin-bottom: 14px; }
+.snapshot__retry { background: var(--danger); color: #fff; border: none; padding: 8px 18px; border-radius: var(--radius); font-weight: 600; cursor: pointer; }
+.snapshot__retry:hover { filter: brightness(1.08); }
+
 /* -------------------------------------------------------------------- KPIs */
 .kpi-grid {
   display: grid;

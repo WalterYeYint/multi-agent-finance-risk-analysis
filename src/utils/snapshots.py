@@ -229,6 +229,21 @@ def find_pending_job(ticker: str, horizon: HorizonName) -> Optional[dict]:
     return _job_row_to_dict(row) if row else None
 
 
+def get_latest_job(ticker: str, horizon: HorizonName) -> Optional[dict]:
+    """Newest job for (ticker, horizon) regardless of status, or None. Lets the
+    API surface a recent 'failed' job to the client instead of silently
+    re-enqueuing it forever (which would show the user a perpetual spinner)."""
+    ensure_schema()
+    with connect() as conn, conn.cursor() as cur:
+        cur.execute(
+            f"SELECT {', '.join(_JOB_COLS)} FROM jobs "
+            "WHERE ticker = %s AND horizon = %s ORDER BY requested_at DESC LIMIT 1",
+            (ticker.upper(), horizon),
+        )
+        row = cur.fetchone()
+    return _job_row_to_dict(row) if row else None
+
+
 def create_job(ticker: str, horizon: HorizonName) -> int:
     """Enqueue a job and return its id. Idempotent per in-flight (ticker,
     horizon): the `jobs_pending_uniq` partial index makes ON CONFLICT DO NOTHING

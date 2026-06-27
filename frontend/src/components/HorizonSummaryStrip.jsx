@@ -42,6 +42,13 @@ function StatusBadge({ status }) {
       </span>
     );
   }
+  if (status === 'failed') {
+    return (
+      <span className="hsum__badge hsum__badge--err">
+        <AlertCircle size={12} /> Failed
+      </span>
+    );
+  }
   if (status === 'error') {
     return (
       <span className="hsum__badge hsum__badge--err">

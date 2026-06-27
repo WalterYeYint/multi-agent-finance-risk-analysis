@@ -162,6 +162,14 @@ def connect(register_types: bool = True) -> "psycopg.Connection":
     which requires the `vector` extension to already exist — so ensure_schema()
     must have run first. ensure_schema() itself connects with register_types=False
     precisely because it is the call that creates the extension.
+
+    Connection discipline: one short-lived connection PER call (opened in a
+    `with` block, closed on exit) — deliberately NO app-side connection pool.
+    Pooling is delegated to the managed pooler in front of Postgres (Supabase's
+    pgbouncer / RDS Proxy) that the deployment already runs; a second in-process
+    pool would just fight it. The worker is serial and the backend read path is
+    TTL-cached, so per-call connect volume stays low. Running multiple workers is
+    safe because claim_next_job() uses FOR UPDATE SKIP LOCKED.
     """
     from utils.retry import retry_call
     try:
