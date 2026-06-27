@@ -68,14 +68,22 @@ backlog so Sprint 2 deploys a solid tree. ~6 hrs/day, **~30 hrs total**.
 - **Exit:** verified via test client — malformed input → clean 400/404 JSON;
       NaN/Inf → `null`. ✅
 
-### Day 3 (2026-06-28) — RAG / ingestion correctness (#7 light)
-- [ ] Stress the new multi-row chunk INSERT on a large 10-K (hundreds of chunks);
-      confirm batch sizing + embedding-namespace tagging are correct and idempotent
-      on re-run.
-- [ ] Verify retrieval date-range filtering returns the right filings per horizon.
-- [ ] Add a lightweight number-grounding check (the eval's hallucination signal) as
-      a guard/log in the fundamental path — flag a quoted number not in any chunk.
-- **Exit:** ingest is idempotent + correct under load; grounding mismatches are visible.
+### Day 3 (2026-06-28) — RAG / ingestion correctness (#7 light) ✅
+- [x] Extracted the multi-row INSERT into `_build_chunk_insert_batches()` and
+      unit-tested batch sizing (1200→500/500/200), param flattening/order, and the
+      embedding-namespace tag. Idempotency skip path is existing code
+      (`has_filing`/per-model count); **live re-run-under-load stress deferred to
+      Day 9 soak** (needs a real DB).
+- [x] Verified retrieval date-range filter — `_build_search_sql` asserts the
+      period-overlap clause (`period_end >= from`, `period_start <= to`) + model
+      namespace, with `filing_type` optional.
+- [x] Number-grounding guard — new shared `utils/grounding.py`
+      (`grounding_report`/`ground_against_filings`, ignores trivial 0–10 ints),
+      wired into the fundamental agent as a non-fatal log of ungrounded numbers;
+      `eval_suite` refactored to reuse the same core (DRY). New
+      `all_chunk_text()` is the grounding source (no embeddings).
+- **Exit:** batching + date-filter + grounding unit-verified (9 tests green);
+      grounding mismatches are logged per run. Live load stress → Day 9. ✅
 
 ### Day 4 (2026-06-29) — Concurrency, DB hygiene & UX (#6, #8)
 - [ ] Settle DB connection discipline (per-call vs a small pool); confirm 2 workers

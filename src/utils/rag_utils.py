@@ -36,6 +36,24 @@ def _period_dates_from_months(year: int, start_month: int,
     return date(year, start_month, 1), date(year, end_month, last_day)
 
 
+_CHUNK_INSERT_BATCH = 500  # 7 params/row → ≤3500 params/stmt (Postgres cap 65535)
+
+
+def _build_chunk_insert_batches(rows, batch_size: int = _CHUNK_INSERT_BATCH):
+    """Yield (values_sql, flat_params) tuples for batched multi-row INSERTs.
+
+    Pipeline-free by construction (one `cur.execute` per batch, never
+    `executemany` — see the note in `_ingest_chunks` re: the transaction-pooler
+    incompatibility). Each row contributes 7 placeholders; batching keeps the
+    bound-parameter count well under Postgres's 65535-per-statement limit.
+    """
+    for i in range(0, len(rows), batch_size):
+        batch = rows[i:i + batch_size]
+        values_sql = ", ".join(["(%s, %s, %s, %s, %s, %s, %s)"] * len(batch))
+        flat = [v for row in batch for v in row]
+        yield values_sql, flat
+
+
 class FundamentalRAG:
     """RAG system for fundamental analysis using 10-K/10-Q documents."""
 
@@ -177,12 +195,7 @@ class FundamentalRAG:
                     # under Postgres's 65535-params-per-statement limit.
                     _cols = ("(filing_id, ticker, chunk_index, content, "
                              "embedding, embedding_model, metadata)")
-                    _BATCH = 500
-                    for _i in range(0, len(rows), _BATCH):
-                        _batch = rows[_i:_i + _BATCH]
-                        _values = ", ".join(
-                            ["(%s, %s, %s, %s, %s, %s, %s)"] * len(_batch))
-                        _flat = [_v for _row in _batch for _v in _row]
+                    for _values, _flat in _build_chunk_insert_batches(rows):
                         cur.execute(
                             f"INSERT INTO filing_chunks {_cols} VALUES {_values}",
                             _flat,
@@ -257,6 +270,18 @@ class FundamentalRAG:
                    LIMIT 1""",
                 (accession_no, self.embedding_model))
             return cur.fetchone() is not None
+
+    def all_chunk_text(self, ticker: str) -> str:
+        """Concatenated text of every stored chunk for `ticker` under the active
+        embedding model. Used as the number-grounding source (no vector search /
+        embeddings needed — we want the full filing text, not a top-k slice)."""
+        ensure_schema()
+        with connect() as conn, conn.cursor() as cur:
+            cur.execute(
+                "SELECT content FROM filing_chunks "
+                "WHERE ticker = %s AND embedding_model = %s",
+                (ticker.upper(), self.embedding_model))
+            return "\n".join(row[0] for row in cur.fetchall())
 
     # --------------------------------------------------------------- retrieve
     @staticmethod

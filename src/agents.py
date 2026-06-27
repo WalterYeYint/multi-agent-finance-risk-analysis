@@ -263,7 +263,21 @@ def fundamental_agent(state: State, config: RunnableConfig):
                 methodology="RAG-enhanced 10-K/10-Q document analysis",
             )
 
-    
+    # Number-grounding guard (approximate hallucination signal): flag any number
+    # the model quoted that doesn't appear anywhere in the stored filing text.
+    # Non-fatal — log only; ground_against_filings swallows its own errors.
+    try:
+        from utils.grounding import ground_against_filings
+        gr = ground_against_filings(fundamental_analysis, state.ticker)
+        if gr.total:
+            msg = (f"🔢 grounding {state.ticker}: {gr.grounded}/{gr.total} numbers "
+                   f"found in filings ({gr.ratio:.0%})")
+            if gr.ungrounded:
+                msg += f" — UNGROUNDED: {gr.ungrounded[:15]}"
+            print(msg)
+    except Exception as e:  # noqa: BLE001
+        print(f"⚠️  grounding check skipped: {e}")
+
     return {"fundamental": fundamental_analysis}
 
 
