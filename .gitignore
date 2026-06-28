@@ -38,3 +38,12 @@ data/chroma_db
 # EDGAR text archive (regenerated on ingest); filings (local PDF seed) is retired.
 data/filings/
 data/filings_raw/
+
+# Pipeline run artifacts (written by `python -m src.main` / run_all_graphs)
+final_state.json
+final_state_with_debate.json
+AnalysisReport_*.pdf
+
+# AWS worker task definition — kept out of git (may hold account ARNs); managed
+# out-of-band per AWS_DEPLOYMENT.md.
+task-worker.json

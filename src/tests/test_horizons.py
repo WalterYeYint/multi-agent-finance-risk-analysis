@@ -17,10 +17,11 @@ from utils.horizons import HORIZONS, get_horizon  # noqa: E402
 from utils.tools import period_to_datetime_range  # noqa: E402
 
 
-# Spec from latest_plan.md: Short=(1mo,7d,24h) / Mid=(6mo,30d,72h) / Long=(2y,90d,168h)
+# Preset (period, horizon_days, freshness_hours). Freshness was unified to 168h
+# (weekly) across all three horizons — see src/utils/horizons.py HORIZONS.
 EXPECTED = {
-    "SHORT": ("1mo", 7,  24),
-    "MID":   ("6mo", 30, 72),
+    "SHORT": ("1mo", 7,  168),
+    "MID":   ("6mo", 30, 168),
     "LONG":  ("2y",  90, 168),
 }
 

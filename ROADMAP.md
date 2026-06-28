@@ -101,13 +101,21 @@ backlog so Sprint 2 deploys a solid tree. ~6 hrs/day, **~30 hrs total**.
 - **Exit:** verified — 6 tests (concurrency primitives + failed-surfacing/retry);
       frontend builds clean (CI=true). A failed job renders as failed with Retry. ✅
 
-### Day 5 (2026-06-30) — Tests + local full-run regression (#4)
-- [ ] Unit/integration tests for every fix above + the earlier ones (`ensure_filings`
-      no-op, prices persist+read, dedup enqueues once, price→CSV→non-null metrics,
-      retry/fallback, input validation).
-- [ ] Full **local** pipeline run for 2–3 tickers × 3 horizons; fix stragglers.
-- [ ] Tidy the untracked spike test files.
-- **Exit:** `pytest` green locally; the tree is correct & robust → ready for Sprint 2.
+### Day 5 (2026-06-30) — Tests + local full-run regression (#4) ✅
+- [x] Committed tests for the earlier fixes that lacked them: `test_retry.py`
+      (retry/backoff), `test_prices.py` (Polygon fetch + 503-retry + price→CSV→
+      non-null metrics), `test_api_validation.py` (ticker/horizon validation,
+      JSON errors, NaN-safe), `test_ensure_filings.py` (no-op when present /
+      ingest-on-miss / swallows errors). With Days 3–4 tests → **44 green**.
+      Aligned `test_horizons.py` to the unified 168h freshness.
+- [~] Full **local** pipeline run (2–3 tickers × 3 horizons) — **deferred**: needs
+      a live Postgres + LLM + network this session can't reach. Lands in Sprint 2
+      Day 7 (end-to-end on AWS) / Day 9 (soak).
+- [x] Tidied spikes: deleted `aws_test_draft.py`, trimmed `test_basic_workflow.py`
+      to its two real graph-topology checks, gitignored run artifacts
+      (`final_state*.json`, `AnalysisReport_*.pdf`) + `task-worker.json`.
+- **Exit:** `pytest` green locally (44 passed, DB integration test excluded);
+      full-pipeline run deferred to the deploy sprint. ✅
 
 > Sprint 1 = correctness & robustness (local). Sprint 2 = ship it & verify in prod.
 

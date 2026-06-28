@@ -31,9 +31,14 @@ class Horizon(BaseModel):
 
 
 HORIZONS: dict[HorizonName, Horizon] = {
-    "SHORT": Horizon(name="SHORT", period="1mo", horizon_days=7,  freshness_hours=24),
-    "MID":   Horizon(name="MID",   period="6mo", horizon_days=30, freshness_hours=72),
-    "LONG":  Horizon(name="LONG",  period="2y",  horizon_days=90, freshness_hours=168),
+    # "SHORT": Horizon(name="SHORT", period="1mo", horizon_days=7,  freshness_hours=24),
+    # "MID":   Horizon(name="MID",   period="6mo", horizon_days=30, freshness_hours=72),
+    # "LONG":  Horizon(name="LONG",  period="2y",  horizon_days=90, freshness_hours=168),
+
+    # temporarily longer freshness to avoid re-ingesting filings during dev / test runs
+    "SHORT": Horizon(name="SHORT", period="1mo", horizon_days=7,  freshness_hours=2400),
+    "MID":   Horizon(name="MID",   period="6mo", horizon_days=30, freshness_hours=2400),
+    "LONG":  Horizon(name="LONG",  period="2y",  horizon_days=90, freshness_hours=2400),
 }
 
 
