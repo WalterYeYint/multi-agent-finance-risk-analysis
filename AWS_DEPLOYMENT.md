@@ -685,6 +685,42 @@ aws cloudfront list-distributions \
 
 **Add two GitHub repo secrets:** `FRONTEND_S3_BUCKET` (the bucket name) and `CLOUDFRONT_DISTRIBUTION_ID` (the `E…` ID). If either is unset, the workflow skips with a warning rather than failing.
 
+### 6e — Custom domain (apex) in front of CloudFront
+
+The live demo is served at the **apex** `nimbusquant.tech` (registered at get.tech), with DNS managed by **Cloudflare**, pointing at the CloudFront distribution `d2p3dyarr7cy72.cloudfront.net`.
+
+**The gotcha — you cannot put a CNAME at the apex.** DNS forbids a CNAME on the zone root (the apex must coexist with the zone's SOA/NS records, and a CNAME can't). CloudFront only gives you a `d…cloudfront.net` *hostname*, not stable IPs — so the naïve `nimbusquant.tech CNAME d2p3dyarr7cy72.cloudfront.net.` is **illegal at the apex**. Registrars that let you save it anyway (get.tech did) produce a record that resolves *inconsistently*:
+
+- Lenient resolvers (e.g. Google `8.8.8.8`) tolerate the apex CNAME → site works.
+- Strict resolvers (many ISP/router resolvers) reject it → **NXDOMAIN** for those visitors, forever, at random depending on whose DNS they use.
+
+This is a real defect, **not a cache-propagation delay** — a cache flush does not fix it. "It works on my phone / on 8.8.8.8" only proves a lenient resolver tolerated the broken record; it says nothing about the visitors on strict resolvers who silently get nothing.
+
+**The fix — apex flattening via Cloudflare (`CNAME` that resolves to `A`).** Cloudflare's DNS supports *CNAME flattening*: you enter what looks like a CNAME at the apex, and Cloudflare resolves the CloudFront hostname **server-side** and answers queries with the underlying **`A` records**, which is legal at the apex:
+
+```
+# Broken (raw apex CNAME at get.tech):
+nimbusquant.tech.   CNAME   d2p3dyarr7cy72.cloudfront.net.    ← illegal at apex → intermittent NXDOMAIN
+
+# Correct (Cloudflare flattens it):
+nimbusquant.tech.   A       18.67.93.11, 18.67.93.25, …       ← Cloudflare-resolved CloudFront IPs, valid at apex
+```
+
+**Setup that's in place:**
+1. Domain registered at get.tech.
+2. Nameservers at get.tech changed to the Cloudflare pair → Cloudflare is now authoritative for the zone (so *every* resolver, including phones, gets Cloudflare's answers — testing "on mobile data" is testing Cloudflare, not get.tech).
+3. In Cloudflare DNS: a record at the apex (`@`) → `d2p3dyarr7cy72.cloudfront.net`, which Cloudflare flattens to `A` records automatically.
+
+**Requirements / caveats:**
+- Add `nimbusquant.tech` as an **Alternate domain name (CNAME)** on the CloudFront distribution, and attach an **ACM certificate (in `us-east-1`)** covering it — otherwise CloudFront serves a TLS host-mismatch error even once DNS is correct.
+- If you ever move DNS back to a registrar **without** apex flattening (ALIAS/ANAME/CNAME-flattening), the intermittent NXDOMAIN failures return. get.tech alone could only have done this correctly if it offered an **ALIAS/ANAME** record type at the apex; plain apex CNAME is the broken state above. The fragile alternative is serving from `www.` (a normal CNAME is legal on a subdomain) with an apex→`www` redirect.
+- A client still showing the old/broken result after the switch is just its local/router resolver cache; it self-heals on TTL expiry, or immediately by pointing the machine's DNS at `1.1.1.1` / `8.8.8.8`.
+
+**Don't confuse the three `502`s on this stack** — they have unrelated causes:
+- **CloudFront `502: couldn't resolve the origin domain name`** — the distribution's *backend origin* hostname is wrong/typo'd (see Step 6c's `fi-<hex>.ecs…` warning). DNS-config error.
+- **Apex DNS NXDOMAIN** (the issue above) — not strictly a 502, but the same "site randomly unreachable" symptom; fixed by Cloudflare apex flattening.
+- **ALB-synthesized `502` under load** — the single-threaded Flask dev server timed out the gateway while the worker ran a job; fixed by serving gunicorn (gthread) in `Dockerfile.backend`. Runtime/concurrency error, nothing to do with DNS.
+
 ---
 
 ## Environment variables
