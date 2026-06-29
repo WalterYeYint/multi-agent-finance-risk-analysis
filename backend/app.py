@@ -526,8 +526,13 @@ if __name__ == '__main__':
         print(f"🤖 Using OpenAI model: {os.getenv('OPENAI_MODEL', 'gpt-4o')}")
     else:
         print(f"🤖 Using Ollama model: {os.getenv('OLLAMA_MODEL', 'qwen3:4b')}")
+    # threaded=True so concurrent frontend polls (3 horizons + price + history)
+    # don't serialize behind one slow DB read — the same starvation that yields
+    # 502s on AWS (where gunicorn handles it instead; see Dockerfile.backend).
+    # Production images run gunicorn, not this block; keep debug opt-in via env.
     app.run(
-        debug=True,
+        debug=os.getenv('FLASK_DEBUG', '').lower() in ('1', 'true', 'yes'),
+        threaded=True,
         host=os.getenv('HOST', '127.0.0.1'),
         port=int(os.getenv('PORT', '8000')),
     )

@@ -22,8 +22,27 @@ const HORIZONS = ['SHORT', 'MID', 'LONG'];
  *   - 'failed' = the worker ran the job and it failed (job.error explains why);
  *     polling stops so the user sees the failure instead of a perpetual spinner,
  *     and `retry(horizon)` re-enqueues a fresh job.
- *   - 'error'  = the request itself failed (network / unexpected backend error).
+ *   - 'error'  = the request itself failed (network / unexpected backend error)
+ *     and kept failing past the transient-retry budget — see below.
+ *
+ * Transient gateway blips (502/503/504, request timeout, or a dropped
+ * connection with no response) are EXPECTED while a job runs: the worker is
+ * busy and the load balancer (the ECS Express Mode ALB) can briefly fail to
+ * reach the backend. These are NOT surfaced as 'error' — the hook keeps the
+ * current "Running" view and keeps polling, only giving up after MAX_TRANSIENT
+ * consecutive blips so a genuinely-down backend still surfaces eventually.
  */
+const MAX_TRANSIENT = 12; // consecutive gateway blips tolerated before 'error'
+
+// A request error we should retry through rather than surface. No `response`
+// at all = network drop / connection reset (container restart, cold path);
+// 5xx / 408 / 429 = the gateway or backend was momentarily unavailable.
+function isTransient(e) {
+  const s = e?.response?.status;
+  if (s == null) return true;
+  return s === 408 || s === 429 || (s >= 500 && s <= 599);
+}
+
 export function useAllSnapshots(ticker, { intervalMs = 3000 } = {}) {
   const [byHorizon, setByHorizon] = useState(() => initialState());
   // pollOne lives inside the effect (closes over the live cancelled flag +
@@ -35,6 +54,7 @@ export function useAllSnapshots(ticker, { intervalMs = 3000 } = {}) {
     if (!ticker) return undefined;
     let cancelled = false;
     const timers = {};
+    const transientFails = {}; // per-horizon consecutive gateway-blip counter
 
     setByHorizon(initialState());
 
@@ -45,6 +65,7 @@ export function useAllSnapshots(ticker, { intervalMs = 3000 } = {}) {
           (force ? '?retry=1' : '');
         const res = await axios.get(url, { validateStatus: (s) => s === 200 || s === 202 });
         if (cancelled) return;
+        transientFails[horizon] = 0; // a real response → reset the blip budget
         if (res.status === 200) {
           setByHorizon((prev) => ({
             ...prev,
@@ -70,6 +91,18 @@ export function useAllSnapshots(ticker, { intervalMs = 3000 } = {}) {
         timers[horizon] = setTimeout(() => pollOne(horizon), intervalMs);
       } catch (e) {
         if (cancelled) return;
+        // A transient gateway blip while a job is in flight: keep the current
+        // view (loading/pending — no setState) and keep polling, backing off a
+        // little to let the gateway recover. Only after MAX_TRANSIENT in a row
+        // do we conclude the backend is actually down and surface the error.
+        if (isTransient(e)) {
+          transientFails[horizon] = (transientFails[horizon] || 0) + 1;
+          if (transientFails[horizon] <= MAX_TRANSIENT) {
+            const backoff = Math.min(intervalMs * 2, 8000);
+            timers[horizon] = setTimeout(() => pollOne(horizon, force), backoff);
+            return;
+          }
+        }
         const msg = e?.response?.data?.error || e.message || 'Snapshot fetch failed';
         setByHorizon((prev) => ({
           ...prev,

@@ -1,5 +1,5 @@
 # Flask backend — read/enqueue path only. The pipeline itself runs in the worker.
-# Image used by AWS App Runner (and locally via docker-compose).
+# Image used by AWS ECS Express Mode (Fargate + ALB) and locally via docker-compose.
 
 FROM python:3.12-slim AS base
 
@@ -38,8 +38,21 @@ ENV HOST=0.0.0.0 \
 
 EXPOSE 8000
 
-# App Runner sends GET / for health by default; the app exposes /api/health.
+# Container-level healthcheck; the ALB target group also probes /api/health.
 HEALTHCHECK --interval=30s --timeout=5s --start-period=20s --retries=3 \
     CMD curl -fsS http://localhost:${PORT}/api/health || exit 1
 
-CMD ["python", "-m", "backend.app"]
+# Production server: gunicorn with a threaded worker. The single-threaded Flask
+# dev server (`python -m backend.app`) serialized requests, so while the worker
+# ran a pipeline the frontend's concurrent polls (3 horizons + price + history)
+# queued behind one slow DB read and the ALB timed them out → 502. gthread
+# workers handle the concurrent read/enqueue load so the load balancer always
+# gets a prompt 200/202. Shell form so ${PORT}/overrides expand at runtime.
+CMD gunicorn \
+    --workers ${GUNICORN_WORKERS:-2} \
+    --threads ${GUNICORN_THREADS:-8} \
+    --worker-class gthread \
+    --timeout ${GUNICORN_TIMEOUT:-120} \
+    --bind 0.0.0.0:${PORT} \
+    --access-logfile - \
+    backend.app:app

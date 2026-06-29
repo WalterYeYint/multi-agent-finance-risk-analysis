@@ -31,6 +31,7 @@ feedparser==6.0.12
 filelock==3.20.0
 Flask==2.3.3
 Flask-Cors==4.0.0
+gunicorn==23.0.0
 flatbuffers==25.9.23
 fonttools==4.60.1
 frozendict==2.4.6
