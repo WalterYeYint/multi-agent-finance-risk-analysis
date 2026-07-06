@@ -1,9 +1,25 @@
 import React from 'react';
 import { BrowserRouter, Routes, Route, Link } from 'react-router-dom';
-import { LineChart } from 'lucide-react';
+import { LineChart, Cpu } from 'lucide-react';
 import Landing from './pages/Landing';
 import TickerView from './pages/TickerView';
+import { useModel } from './hooks/useModel';
 import './App.css';
+
+/** N9: badge showing which LLM is producing analyses, so users can gauge trust. */
+function ModelBadge() {
+  const { model } = useModel();
+  if (!model?.label) return null;
+  return (
+    <span
+      className="model-badge"
+      title={`Analyses are produced by ${model.label}`}
+    >
+      <Cpu size={13} />
+      <span>{model.label}</span>
+    </span>
+  );
+}
 
 function Header() {
   return (
@@ -12,6 +28,8 @@ function Header() {
         <LineChart size={20} />
         <span>finance-research</span>
       </Link>
+      <span className="app-header__spacer" />
+      <ModelBadge />
       <span className="app-header__tag">research tool · not investment advice</span>
     </header>
   );

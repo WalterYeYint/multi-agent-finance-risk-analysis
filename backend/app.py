@@ -155,7 +155,7 @@ def get_available_models():
             return jsonify({
                 'error': 'Ollama is not reachable. Start it with: ollama serve'
             }), 503
-        current_model = os.getenv('OLLAMA_MODEL', 'qwen3:4b')
+        current_model = os.getenv('OLLAMA_MODEL', 'llama3.2:3b')  # match config.get_llm default
         description = 'Local Ollama model'
         models = [current_model]
     else:
@@ -169,6 +169,26 @@ def get_available_models():
         'current_model': current_model,
         'description': description
     })
+
+
+@app.route('/api/model', methods=['GET'])
+def get_active_model():
+    """Lightweight, always-200 indicator of the currently-configured LLM so the
+    UI can render a 'which model produced this' badge (N9). Reflects the active
+    config; reachability / degraded-fallback state is out of scope here.
+    Model-name defaults mirror config.get_llm so the badge can't lie."""
+    provider, _openai_key = _detect_model_provider()
+    if provider == 'openai':
+        model = os.getenv('OPENAI_MODEL', 'gpt-4o')
+        label = f'OpenAI · {model}'
+    elif provider == 'ollama':
+        model = os.getenv('OLLAMA_MODEL', 'llama3.2:3b')
+        label = f'Ollama · {model}'
+    else:
+        model = provider
+        label = provider
+    return jsonify({'provider': provider, 'model': model, 'label': label})
+
 
 def _attach_pdf(resp: dict) -> dict:
     """Render the snapshot's markdown report to a base64 PDF (best-effort)."""
