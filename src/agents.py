@@ -1,6 +1,6 @@
 import ast
 from datetime import datetime
-from typing import Optional
+from typing import Optional, TypeVar, cast
 from langchain_core.messages import SystemMessage, HumanMessage, AIMessage
 from langchain_core.runnables import RunnableConfig
 from pydantic import BaseModel
@@ -14,7 +14,7 @@ from utils.schemas import (
     FundamentalAnalysis, FundamentalExtract, DebateReport
 )
 from utils.rag_utils import FundamentalRAG
-from langgraph.prebuilt import create_react_agent
+from langchain.agents import create_agent
 
 from dotenv import load_dotenv
 load_dotenv()
@@ -23,6 +23,30 @@ load_dotenv()
 # import os
 # os.environ.setdefault("LANGCHAIN_TRACING_V2", "true")
 # os.environ.setdefault("LANGCHAIN_PROJECT", "Multi-Agent Finance Bot")
+
+
+_S = TypeVar("_S", bound=BaseModel)
+
+
+def _run_structured_agent(llm, tools, system_prompt, human_msg,
+                          structuring_prompt, schema: type[_S]) -> _S:
+    """create_agent replacement for create_react_agent(..., response_format=(prompt, schema)).
+
+    Runs the create_agent ReAct/tool loop, THEN a SEPARATE forced structured-
+    output call. Keeping structuring as its own with_structured_output step is
+    load-bearing: create_agent's in-loop ToolStrategy needs the model to *choose*
+    to emit a final structured tool call, which small local models (llama3.2 via
+    Ollama) don't — they ramble prose instead (measured: fundamental 0/3 with
+    ToolStrategy vs 3/3 with this two-step). Mirrors what create_react_agent did
+    internally: SystemMessage(structuring_prompt) + full history, then
+    model.with_structured_output(schema).
+    """
+    agent = create_agent(llm, tools=tools, system_prompt=system_prompt)
+    result = agent.invoke({"messages": [("human", human_msg)]})
+    structured_llm = llm.with_structured_output(schema)
+    return cast(_S, structured_llm.invoke(
+        [SystemMessage(content=structuring_prompt)] + result["messages"]
+    ))
 
 
 class State(BaseModel):
@@ -124,24 +148,22 @@ def sentiment_agent(state: State, config: RunnableConfig):
     Provide a concise summary along with an informed recommendation on whether to invest in this stock for the next {state.horizon_days} days.
     """
 
-    # The schema is enforced by a constrained-decoding structuring step
-    # (create_react_agent's response_format), not by a prompt marker — so it
-    # works the same with GPT-4o and small local models like llama3.1.
+    # The schema is enforced by a separate constrained-decoding structuring step
+    # (with_structured_output, via _run_structured_agent), not by a prompt marker
+    # — so it works the same with GPT-4o and small local models like llama3.1.
     structuring_prompt = (
         "Using the analysis above, fill EVERY field of the structured sentiment "
         "summary. key_insights must be a list of plain-sentence strings (not "
         "objects). confidence_score must be between 0.0 and 1.0."
     )
-    sentiment_agent = create_react_agent(
-        llm, [], prompt=SENTIMENT_SYSTEM,
-        response_format=(structuring_prompt, SentimentExtract),
-    )
 
-    # Execute the agent
+    # Execute the agent, then structure its output.
     extract = None
     try:
-        result = sentiment_agent.invoke({"messages": [("human", analysis_prompt)]})
-        extract = result.get("structured_response")
+        extract = _run_structured_agent(
+            llm, [], SENTIMENT_SYSTEM, analysis_prompt,
+            structuring_prompt, SentimentExtract,
+        )
     except Exception as e:
         print(f"Agent execution error: {e}")
 
@@ -210,19 +232,15 @@ def fundamental_agent(state: State, config: RunnableConfig):
     else:
         from_year, from_month, to_year, to_month = period_to_months_range(state.period, end_year, end_month)
 
-        # Create agent with tools. The schema is enforced by a constrained-
-        # decoding structuring step (response_format), so it works the same
-        # with GPT-4o and small local models like llama3.1.
+        # Create agent with tools. The schema is enforced by a separate
+        # with_structured_output structuring step (_run_structured_agent), so it
+        # works the same with GPT-4o and small local models like llama3.1.
         llm = get_llm()
         structuring_prompt = (
             "Using the analysis and retrieved filing excerpts above, fill EVERY "
             "field of the structured fundamental analysis. financial_health_score "
             "must be a number between 0 and 10. List fields must contain plain "
             "strings."
-        )
-        fundamental_agent = create_react_agent(
-            llm, [query_10k_documents], prompt=FUNDAMENTAL_SYSTEM,
-            response_format=(structuring_prompt, FundamentalExtract),
         )
 
         query_msg = f"""
@@ -231,11 +249,13 @@ def fundamental_agent(state: State, config: RunnableConfig):
     Cover the executive summary, key financial metrics, business highlights, risk factors, competitive position, growth prospects, a 0-10 financial health score, an investment thesis, and concerns/risks.
     """
 
-        # Execute the agent
+        # Execute the agent, then structure its output.
         extract = None
         try:
-            result = fundamental_agent.invoke({"messages": [("human", query_msg)]})
-            extract = result.get("structured_response")
+            extract = _run_structured_agent(
+                llm, [query_10k_documents], FUNDAMENTAL_SYSTEM, query_msg,
+                structuring_prompt, FundamentalExtract,
+            )
         except Exception as e:
             print(f"query_10k_documents invocation failed: {e}")
 
