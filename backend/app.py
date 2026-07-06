@@ -190,6 +190,21 @@ def get_active_model():
     return jsonify({'provider': provider, 'model': model, 'label': label})
 
 
+@app.route('/api/ticker/<ticker>', methods=['GET'])
+def validate_ticker(ticker):
+    """Existence check for the search box: 200 if `ticker` is a recognized SEC
+    filer, else 404. Lets the UI reject typos before navigating / enqueuing."""
+    t, err = _clean_ticker(ticker)
+    if err:
+        return err
+    if not _ticker_is_known(t):
+        return jsonify({
+            'error': f'"{t}" is not a recognized US-listed SEC filer.',
+            'code': 'unknown_ticker', 'ticker': t, 'known': False,
+        }), 404
+    return jsonify({'ticker': t, 'known': True})
+
+
 def _attach_pdf(resp: dict) -> dict:
     """Render the snapshot's markdown report to a base64 PDF (best-effort)."""
     md = (resp.get('report') or {}).get('markdown_report')
@@ -286,6 +301,31 @@ def _cached_tracked_tickers():
     return list_tracked_tickers()
 
 
+# SEC's ticker->CIK list changes slowly; cache the whole set ~24h so ticker
+# existence checks don't hit SEC on every lookup.
+_CIK_TTL_S = 24 * 3600
+_cik_cache: TTLCache = TTLCache(maxsize=1, ttl=_CIK_TTL_S)
+
+
+@cached(cache=_cik_cache, lock=_cache_lock)
+def _known_tickers() -> frozenset:
+    """Uppercased set of every SEC-registered ticker. Raises on fetch failure so
+    the failure is NOT cached (the caller then fails open and retries later)."""
+    from utils.edgar_ingest import load_cik_map
+    return frozenset(load_cik_map().keys())
+
+
+def _ticker_is_known(ticker: str) -> bool:
+    """True if `ticker` is a recognized SEC filer. Fails OPEN (returns True) when
+    the SEC ticker map can't be loaded, so a network blip never blocks a valid
+    lookup — the pipeline's own no-filings handling is the backstop."""
+    try:
+        return ticker.upper() in _known_tickers()
+    except Exception as e:  # noqa: BLE001
+        print(f"⚠️  ticker validation skipped (SEC map unavailable): {e}")
+        return True
+
+
 @cached(cache=_overview_cache, lock=_cache_lock)
 def _cached_overview():
     return list_latest_snapshots_overview()
@@ -349,6 +389,17 @@ def _resolve_snapshot(ticker: str, horizon, *, force: bool = False):
     fresh = get_latest_snapshot(ticker, horizon.name)
     if fresh and is_fresh(fresh, horizon):
         return jsonify(_attach_pdf(_serialize_snapshot(fresh, cached=True)))
+
+    # Reject unknown symbols at the door: don't create a doomed job for a ticker
+    # that isn't a real SEC filer — it would burn a full pipeline run and, with no
+    # filings, yield an empty fundamental analysis. Cache hits above already
+    # returned, so this only runs for genuinely new/uncached tickers.
+    if not _ticker_is_known(ticker):
+        return jsonify({
+            'error': f'"{ticker}" is not a recognized US-listed SEC filer. '
+                     f'Check the symbol and try again.',
+            'code': 'unknown_ticker',
+        }), 404
 
     # Surface a recent failure instead of re-enqueuing it forever. A failed job
     # is terminal (it no longer blocks create_job's dedup), so without this the

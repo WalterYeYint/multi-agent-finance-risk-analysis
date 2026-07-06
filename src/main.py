@@ -110,6 +110,18 @@ def run_pipeline_for_horizon(
         if progress_cb is not None:
             progress_cb(msg)
 
+    # Fail closed (I20): if the provider chain fell back to MockLLM, refuse to
+    # run — persisting placeholder output as a real snapshot would be silent fake
+    # analysis. Raising here marks the job 'failed' with this reason (surfaced by
+    # the existing failed-job UX). Opt out for local dev/tests with ALLOW_MOCK_LLM=1.
+    from utils.config import is_degraded_llm
+    _allow_mock = os.getenv("ALLOW_MOCK_LLM", "").strip().lower() in ("1", "true", "yes", "on")
+    if not _allow_mock and is_degraded_llm():
+        raise RuntimeError(
+            "LLM unavailable (degraded): the provider chain fell back to MockLLM, "
+            "which produces placeholder output — refusing to persist a fake analysis. "
+            "Set OPENAI_API_KEY or start Ollama (or set ALLOW_MOCK_LLM=1 to override).")
+
     h = get_horizon(horizon_name)
     chain = build_chain_graph()
     state = State(

@@ -180,6 +180,19 @@ def get_llm(temperature: float = 0.1, model_provider: str = "auto", max_tokens=1
     return MockLLM(temperature=temperature)
 
 
+def is_degraded_llm(llm=None) -> bool:
+    """True when the resolved chat model is the MockLLM fallback — i.e. no real
+    provider (OpenAI / Anthropic / Google / Ollama) was available.
+
+    The pipeline uses this to FAIL CLOSED (I20): refuse to run rather than persist
+    placeholder analysis as if it were a real result. Constructs an LLM to test
+    when none is passed. MockLLM is defined later in this module; the reference
+    resolves at call time, so the forward use is fine."""
+    if llm is None:
+        llm = get_llm()
+    return isinstance(llm, MockLLM)
+
+
 def get_embeddings(model_provider: str = "auto"):
     """
     Get an embeddings instance based on available API keys and preferences.
