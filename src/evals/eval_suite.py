@@ -88,8 +88,12 @@ def _fundamental_populated(f) -> bool:
 # ----------------------------------------------------------------- metric (b)
 def number_grounding(fundamental, ticker: str) -> tuple[int, int]:
     """Return (grounded, total): how many numbers in the fundamental analysis
-    also appear in the ticker's retrieved filing chunks. The number logic is the
-    shared `grounding_report`; the source here is the top-k retrieved slice."""
+    also appear in the ticker's source financials. Source = the top-k retrieved
+    RAG chunks PLUS (when USE_SEC_MCP is on) the exact XBRL figures from the SEC
+    MCP server. The XBRL half is essential once the agent quotes XBRL numbers:
+    those never appear in the flattened RAG text and would otherwise be scored as
+    ungrounded, wrongly reading as hallucination. The number logic is the shared
+    `grounding_report`."""
     if fundamental is None:
         return 0, 0
     rag = FundamentalRAG()
@@ -97,6 +101,11 @@ def number_grounding(fundamental, ticker: str) -> tuple[int, int]:
         ticker, STANDARD_QUERIES, from_date=date(2000, 1, 1), to_date=date.today())
     source = " ".join(
         doc.page_content for chunks in chunk_lists for doc in chunks)
+    try:
+        from utils.mcp_tools import fetch_sec_xbrl_text
+        source += "\n" + fetch_sec_xbrl_text(ticker)
+    except Exception:  # noqa: BLE001 — XBRL is a bonus source, never required
+        pass
     r = grounding_report(fundamental, source)
     return r.grounded, r.total
 

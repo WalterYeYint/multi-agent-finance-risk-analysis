@@ -80,7 +80,17 @@ def ground_against_filings(fundamental, ticker: str, *, rag=None) -> GroundingRe
         if rag is None:
             from utils.rag_utils import FundamentalRAG
             rag = FundamentalRAG()
-        return grounding_report(fundamental, rag.all_chunk_text(ticker))
+        source = rag.all_chunk_text(ticker)
+        # Also ground against the exact XBRL figures the fundamental agent may
+        # have pulled via the SEC MCP server — those aren't in the flattened
+        # filing text, so without this correct XBRL numbers read as ungrounded.
+        # No-op ("") when USE_SEC_MCP is off, so default behaviour is unchanged.
+        try:
+            from utils.mcp_tools import fetch_sec_xbrl_text
+            source = source + "\n" + fetch_sec_xbrl_text(ticker)
+        except Exception:  # noqa: BLE001 — XBRL is a bonus source, never required
+            pass
+        return grounding_report(fundamental, source)
     except Exception as e:  # noqa: BLE001
         print(f"⚠️  grounding check skipped for {ticker}: {e}")
         return GroundingResult(0, 0, [])

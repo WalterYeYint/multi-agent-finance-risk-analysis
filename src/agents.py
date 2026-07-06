@@ -1,4 +1,5 @@
 import ast
+import asyncio
 from datetime import datetime
 from typing import Optional, TypeVar, cast
 from langchain_core.messages import SystemMessage, HumanMessage, AIMessage
@@ -14,6 +15,7 @@ from utils.schemas import (
     FundamentalAnalysis, FundamentalExtract, DebateReport
 )
 from utils.rag_utils import FundamentalRAG
+from utils.mcp_tools import load_sec_mcp_tools
 from langchain.agents import create_agent
 
 from dotenv import load_dotenv
@@ -29,7 +31,8 @@ _S = TypeVar("_S", bound=BaseModel)
 
 
 def _run_structured_agent(llm, tools, system_prompt, human_msg,
-                          structuring_prompt, schema: type[_S]) -> _S:
+                          structuring_prompt, schema: type[_S],
+                          *, use_async: bool = False) -> _S:
     """create_agent replacement for create_react_agent(..., response_format=(prompt, schema)).
 
     Runs the create_agent ReAct/tool loop, THEN a SEPARATE forced structured-
@@ -42,7 +45,13 @@ def _run_structured_agent(llm, tools, system_prompt, human_msg,
     model.with_structured_output(schema).
     """
     agent = create_agent(llm, tools=tools, system_prompt=system_prompt)
-    result = agent.invoke({"messages": [("human", human_msg)]})
+    if use_async:
+        # MCP tools (e.g. the SEC EDGAR server) are async-only; run the whole
+        # ReAct/tool loop inside one event loop. Safe: the pipeline (worker /
+        # eval / main) runs synchronously with no outer loop, so asyncio.run works.
+        result = asyncio.run(agent.ainvoke({"messages": [("human", human_msg)]}))
+    else:
+        result = agent.invoke({"messages": [("human", human_msg)]})
     structured_llm = llm.with_structured_output(schema)
     return cast(_S, structured_llm.invoke(
         [SystemMessage(content=structuring_prompt)] + result["messages"]
@@ -249,12 +258,27 @@ def fundamental_agent(state: State, config: RunnableConfig):
     Cover the executive summary, key financial metrics, business highlights, risk factors, competitive position, growth prospects, a 0-10 financial health score, an investment thesis, and concerns/risks.
     """
 
-        # Execute the agent, then structure its output.
+        # N4: complement the RAG (narrative, weak on exact numbers) with a
+        # self-hosted SEC EDGAR MCP server (exact XBRL financials). Off unless
+        # USE_SEC_MCP=1; returns [] and no-ops otherwise, so the agent behaves
+        # exactly as before when disabled/unavailable.
+        mcp_tools = load_sec_mcp_tools()
+        if mcp_tools:
+            query_msg += (
+                "\n    You ALSO have SEC EDGAR tools that return EXACT XBRL financial "
+                "figures (revenue, EPS, margins, segment revenue) for a ticker. Use "
+                "those for precise numbers, and use query_10k_documents for narrative/"
+                "qualitative context. Prefer the exact SEC figures over any numbers "
+                "paraphrased from filing text.\n"
+            )
+
+        # Execute the agent, then structure its output. MCP tools are async, so
+        # run the agent loop on an event loop when they're present.
         extract = None
         try:
             extract = _run_structured_agent(
-                llm, [query_10k_documents], FUNDAMENTAL_SYSTEM, query_msg,
-                structuring_prompt, FundamentalExtract,
+                llm, [query_10k_documents, *mcp_tools], FUNDAMENTAL_SYSTEM, query_msg,
+                structuring_prompt, FundamentalExtract, use_async=bool(mcp_tools),
             )
         except Exception as e:
             print(f"query_10k_documents invocation failed: {e}")

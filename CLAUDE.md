@@ -117,6 +117,7 @@ Required env vars (set in `.env`, loaded via `python-dotenv`):
 - `OPENAI_API_KEY` *or* run Ollama locally (one of the two)
 - `DATABASE_URL` — Postgres+pgvector connection for the RAG store (default `postgresql://finance:finance@localhost:5432/finance_rag`)
 - `SEC_USER_AGENT` — contact string for SEC EDGAR auto-ingest; `FILINGS_RAW_DIR` — where extracted filing text is archived (default `./data/filings_raw`)
+- `USE_SEC_MCP` — set `1` to give the fundamental agent a self-hosted **SEC EDGAR MCP** server ([src/utils/mcp_tools.py](src/utils/mcp_tools.py)) exposing **exact XBRL financials** (`get_financials`, `get_company_facts`, `get_key_metrics`, …) *alongside* `query_10k_documents` (RAG is narrative-only, weak on exact numbers). Off by default; any failure degrades to RAG-only. Server is env-configurable: `SEC_MCP_URL` (connect to a running HTTP endpoint) **or** `SEC_MCP_COMMAND`/`SEC_MCP_ARGS` (spawn via stdio, default `uvx sec-edgar-mcp`); `SEC_MCP_TOOLS` narrows the exposed tools (default: the financials subset; `all` = every tool). The server reads `SEC_EDGAR_USER_AGENT`, auto-populated from `SEC_USER_AGENT`. Needs `langchain-mcp-adapters` + `uvx` (or a reachable HTTP server).
 - `POLYGON_API_KEY` — for real news; falls back to synthetic briefs if missing
 - `LANGCHAIN_API_KEY`, `LANGCHAIN_TRACING_V2=true`, `LANGCHAIN_PROJECT` — for LangSmith tracing (optional)
 - `ANALYSIS_MODE` — `chain` (default) or `debate`; can also be passed per-request as `mode` in the `/api/analyze` body
