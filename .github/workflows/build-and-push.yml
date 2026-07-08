@@ -10,8 +10,9 @@ name: build-and-push
 # Prerequisites (one-time):
 #   - ECR repos exist: `finance-agents-backend` and `finance-agents-worker`
 #     (created in AWS_DEPLOYMENT.md Step 2)
-#   - IAM user behind AWS_ACCESS_KEY_ID / AWS_SECRET_ACCESS_KEY has at least the
-#     AmazonEC2ContainerRegistryPowerUser managed policy attached.
+#   - GitHub OIDC role set up and its ARN stored as the repo secret
+#     AWS_OIDC_ROLE_ARN (deploy/iam/setup-github-oidc.sh; AWS_DEPLOYMENT.md
+#     Step 3.6a). The role carries ECR PowerUser + ECS Express + frontend perms.
 
 on:
   workflow_dispatch:
@@ -28,6 +29,7 @@ on:
 
 permissions:
   contents: read
+  id-token: write   # OIDC: mint the token exchanged for short-lived AWS creds
 
 concurrency:
   group: build-and-push-${{ github.ref }}
@@ -48,11 +50,10 @@ jobs:
       - name: Checkout
         uses: actions/checkout@v4
 
-      - name: Configure AWS credentials
+      - name: Configure AWS credentials (OIDC)
         uses: aws-actions/configure-aws-credentials@v4
         with:
-          aws-access-key-id: ${{ secrets.AWS_ACCESS_KEY_ID }}
-          aws-secret-access-key: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
+          role-to-assume: ${{ secrets.AWS_OIDC_ROLE_ARN }}
           aws-region: ${{ env.AWS_REGION }}
 
       - name: Log in to Amazon ECR
@@ -102,11 +103,10 @@ jobs:
       IMAGE_TAG: ${{ github.sha }}
 
     steps:
-      - name: Configure AWS credentials
+      - name: Configure AWS credentials (OIDC)
         uses: aws-actions/configure-aws-credentials@v4
         with:
-          aws-access-key-id: ${{ secrets.AWS_ACCESS_KEY_ID }}
-          aws-secret-access-key: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
+          role-to-assume: ${{ secrets.AWS_OIDC_ROLE_ARN }}
           aws-region: ${{ env.AWS_REGION }}
 
       - name: Log in to Amazon ECR
@@ -212,11 +212,10 @@ jobs:
       POLYGON_KEY_SECRET_ARN: ${{ secrets.POLYGON_KEY_SECRET_ARN }}
 
     steps:
-      - name: Configure AWS credentials
+      - name: Configure AWS credentials (OIDC)
         uses: aws-actions/configure-aws-credentials@v4
         with:
-          aws-access-key-id: ${{ secrets.AWS_ACCESS_KEY_ID }}
-          aws-secret-access-key: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
+          role-to-assume: ${{ secrets.AWS_OIDC_ROLE_ARN }}
           aws-region: ${{ env.AWS_REGION }}
 
       - name: Log in to Amazon ECR

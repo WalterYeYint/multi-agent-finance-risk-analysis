@@ -63,7 +63,7 @@ Two containers built from the same source tree (`Dockerfile.backend`, `Dockerfil
 
 ## Pre-reqs
 
-- AWS CLI v2 (`aws configure` with a deploy IAM user)
+- AWS CLI v2 (`aws configure` with an admin identity, for the one-time setup steps below)
 - Docker locally
 - An AWS region (this guide uses `ap-southeast-2` — substitute yours)
 - An OpenAI API key, optional Polygon key, a real `SEC_USER_AGENT` contact string
@@ -286,56 +286,28 @@ The deploy job already passes them as the `secrets:` input to `aws-actions/amazo
 > - `User ... is not authorized to perform: ecs:DescribeServices` → deploy user is missing ECS permissions (3.6a)
 > - `Unable to assume the service linked role. Please verify that the ECS service linked role exists.` → fresh account has no ECS/ELB/autoscaling service-linked roles (3.6b)
 
-### 3.6a — Grant the deploy IAM user ECS Express permissions
+### 3.6a — CI authentication via GitHub OIDC (no static keys) [I19]
 
-The IAM user behind your GitHub Actions keys (`AWS_ACCESS_KEY_ID` / `AWS_SECRET_ACCESS_KEY`) needs **two** permission sets:
+CI authenticates to AWS with **GitHub OIDC**, not a long-lived IAM user. Each workflow run mints a short-lived OIDC token that GitHub exchanges for temporary AWS credentials by assuming a role trusted only for **this repo** — nothing static is stored in GitHub, and there are no access keys to leak or rotate.
 
-1. **ECR** (for `build` / push) — attach the AWS-managed `AmazonEC2ContainerRegistryPowerUser`, or an equivalent scoped policy. (If your build+push already succeeds, this is done.)
-2. **ECS Express + PassRole** (for the `deploy` job) — not covered by any single managed policy, so attach this inline policy:
+Run the setup script once with an AWS admin identity. It registers the GitHub OIDC provider, creates the role (`github-actions-oidc-deploy`) with a repo-scoped trust policy, and attaches all three permission sets the workflows need — **ECR** (`AmazonEC2ContainerRegistryPowerUser`), **ECS Express + PassRole**, and **frontend** (S3 sync + CloudFront invalidation):
 
 ```bash
-export DEPLOY_IAM_USER=<your-ci-iam-user>   # e.g. the user whose keys are in GitHub secrets
+# Optional: scope the frontend policy to your real bucket/distribution.
+export FRONTEND_S3_BUCKET=<your-frontend-bucket>          # optional
+export CLOUDFRONT_DISTRIBUTION_ID=<your-distribution-id>  # optional
 
-aws iam put-user-policy \
-  --user-name "$DEPLOY_IAM_USER" \
-  --policy-name GitHubActionsECSExpressDeploy \
-  --policy-document "$(cat <<EOF
-{
-  "Version": "2012-10-17",
-  "Statement": [
-    {
-      "Sid": "ECSExpressDeploy",
-      "Effect": "Allow",
-      "Action": [
-        "ecs:CreateCluster",
-        "ecs:RegisterTaskDefinition",
-        "ecs:CreateExpressGatewayService",
-        "ecs:UpdateExpressGatewayService",
-        "ecs:DescribeExpressGatewayService",
-        "ecs:DescribeClusters",
-        "ecs:DescribeServices",
-        "ecs:ListServiceDeployments",
-        "ecs:DescribeServiceDeployments",
-        "ecs:UpdateService"
-      ],
-      "Resource": "*"
-    },
-    {
-      "Sid": "PassExpressRoles",
-      "Effect": "Allow",
-      "Action": "iam:PassRole",
-      "Resource": [
-        "arn:aws:iam::${AWS_ACCOUNT_ID}:role/ecsTaskExecutionRole",
-        "arn:aws:iam::${AWS_ACCOUNT_ID}:role/ecsInfrastructureRoleForExpressServices"
-      ]
-    }
-  ]
-}
-EOF
-)"
+bash deploy/iam/setup-github-oidc.sh
 ```
 
-The `iam:PassRole` block references the two roles from [Step 4a](#4a--iam-roles-one-time). The policy attaches fine before those roles exist — but the roles must exist by deploy time, so do Step 4a too (order between 3.6a and 4a doesn't matter).
+It prints the role ARN. Finish wiring it up:
+
+1. Add it as the repo secret **`AWS_OIDC_ROLE_ARN`** (GitHub → Settings → Secrets and variables → Actions).
+2. **Delete** the old `AWS_ACCESS_KEY_ID` / `AWS_SECRET_ACCESS_KEY` repo secrets, and delete the CI IAM user's access keys in AWS — the workflows no longer use them.
+
+The role's **ECS Express + PassRole** inline policy (`ECSExpressDeploy`) grants `ecs:CreateCluster/RegisterTaskDefinition/{Create,Update,Describe}ExpressGatewayService/DescribeClusters/DescribeServices/ListServiceDeployments/DescribeServiceDeployments/UpdateService` on `*`, plus `iam:PassRole` scoped to the two roles from [Step 4a](#4a--iam-roles-one-time) (`ecsTaskExecutionRole`, `ecsInfrastructureRoleForExpressServices`). Those roles must exist by deploy time, so do Step 4a too (order between 3.6a and 4a doesn't matter). The exact policy documents live in [`deploy/iam/setup-github-oidc.sh`](deploy/iam/setup-github-oidc.sh).
+
+> **Runtime Bedrock task role (for N3):** when you add Bedrock as an LLM provider, the *containers* need `bedrock:InvokeModel` at runtime — a **task role**, distinct from the deploy role above and from `ecsTaskExecutionRole`. A least-privilege policy is ready at [`deploy/iam/bedrock-task-role-policy.json`](deploy/iam/bedrock-task-role-policy.json); attach it as the task definition's `taskRoleArn` once N3 lands.
 
 ### 3.6b — Create the ECS service-linked roles
 
@@ -409,7 +381,7 @@ Set these **GitHub repo secrets** (Settings → Secrets and variables → Action
 
 | GitHub repo secret | Value | From |
 |---|---|---|
-| `AWS_ACCESS_KEY_ID` / `AWS_SECRET_ACCESS_KEY` | the deploy IAM user's keys | [3.6a](#36a--grant-the-deploy-iam-user-ecs-express-permissions) |
+| `AWS_OIDC_ROLE_ARN` | the GitHub OIDC deploy role ARN (no static keys) | [3.6a](#36a--ci-authentication-via-github-oidc-no-static-keys-i19) |
 | `ECS_EXEC_ROLE_ARN` | `ecsTaskExecutionRole` ARN | [4a](#4a--iam-roles-one-time) (`$EXEC_ROLE_ARN`) |
 | `ECS_INFRA_ROLE_ARN` | `ecsInfrastructureRoleForExpressServices` ARN | [4a](#4a--iam-roles-one-time) (`$INFRA_ROLE_ARN`) |
 | `DATABASE_URL_SECRET_ARN` | Secrets Manager ARN | [3.5](#step-35--secrets-secrets-manager) |
@@ -420,7 +392,7 @@ Then push to `main` (or run the workflow manually from the Actions tab). On succ
 
 1. ECR repos exist ([Step 2](#step-2--container-registry-two-ecr-repos))
 2. Secrets Manager secrets + execution-role grant ([Step 3.5](#step-35--secrets-secrets-manager))
-3. Deploy-user ECS policy ([3.6a](#36a--grant-the-deploy-iam-user-ecs-express-permissions)) + service-linked roles ([3.6b](#36b--create-the-ecs-service-linked-roles))
+3. OIDC deploy role + ECS policy ([3.6a](#36a--ci-authentication-via-github-oidc-no-static-keys-i19)) + service-linked roles ([3.6b](#36b--create-the-ecs-service-linked-roles))
 4. The two IAM roles ([4a](#4a--iam-roles-one-time))
 5. All five GitHub repo secrets above
 
@@ -655,25 +627,12 @@ aws s3 sync frontend/build/ s3://$FE_BUCKET --delete
 
 Once the bucket + distribution exist (the manual 6a–6c above), [`.github/workflows/deploy-frontend.yml`](.github/workflows/deploy-frontend.yml) takes over: on every push to `main` touching `frontend/**`, it runs `npm ci && npm run build`, `s3 sync --delete` (with correct cache headers — immutable for fingerprinted assets, no-cache for `index.html`), and a CloudFront `/*` invalidation. It's a separate workflow from `build-and-push.yml` so frontend changes don't trigger backend Docker builds (and vice versa).
 
-**Deploy IAM user permissions** — the user behind the GitHub keys needs S3 write + CloudFront invalidation:
+**Frontend deploy permissions** — already carried by the OIDC deploy role: [`deploy/iam/setup-github-oidc.sh`](deploy/iam/setup-github-oidc.sh) attaches a `FrontendDeploy` inline policy (S3 write + `cloudfront:CreateInvalidation`) in [Step 3.6a](#36a--ci-authentication-via-github-oidc-no-static-keys-i19). If you ran that script *before* the bucket/distribution existed, its resources defaulted to `"*"` — re-run it (idempotent) with them set to tighten the scope:
 
 ```bash
-export FE_BUCKET=...          # your bucket name from 6b
-export DIST_ID=...            # see below
-aws iam put-user-policy --user-name "$DEPLOY_IAM_USER" \
-  --policy-name GitHubActionsFrontendDeploy \
-  --policy-document "$(cat <<EOF
-{
-  "Version": "2012-10-17",
-  "Statement": [
-    {"Effect":"Allow","Action":["s3:PutObject","s3:DeleteObject","s3:ListBucket"],
-     "Resource":["arn:aws:s3:::$FE_BUCKET","arn:aws:s3:::$FE_BUCKET/*"]},
-    {"Effect":"Allow","Action":"cloudfront:CreateInvalidation",
-     "Resource":"arn:aws:cloudfront::${AWS_ACCOUNT_ID}:distribution/$DIST_ID"}
-  ]
-}
-EOF
-)"
+export FRONTEND_S3_BUCKET=...            # your bucket name from 6b
+export CLOUDFRONT_DISTRIBUTION_ID=...    # the E… ID, see below
+bash deploy/iam/setup-github-oidc.sh     # updates the role's policies in place
 ```
 
 **Find the CloudFront distribution ID** (it's not the `d…cloudfront.net` domain — it's the `E…` ID):
@@ -848,11 +807,11 @@ aws ecr delete-repository --repository-name $PROJECT-worker  --force
 
 ## Troubleshooting
 
-- **`User ... is not authorized to perform: ecs:DescribeServices`** (or any other `ecs:*` action) in the GitHub Actions deploy job — the deploy IAM user lacks ECS Express permissions. Attach the policy in [Step 3.6a](#36a--grant-the-deploy-iam-user-ecs-express-permissions). The error names the *first* missing action; the policy covers them all so you won't hit them one at a time.
+- **`User ... is not authorized to perform: ecs:DescribeServices`** (or any other `ecs:*` action) in the GitHub Actions deploy job — the OIDC deploy role lacks ECS Express permissions. Re-run the setup script in [Step 3.6a](#36a--ci-authentication-via-github-oidc-no-static-keys-i19). The error names the *first* missing action; the policy covers them all so you won't hit them one at a time.
 - **`Unable to assume the service linked role. Please verify that the ECS service linked role exists.`** — fresh account with no ECS/ELB/autoscaling service-linked roles. Run the three `create-service-linked-role` commands in [Step 3.6b](#36b--create-the-ecs-service-linked-roles).
 - **Worker tasks fail at init with `ResourceInitializationError ... not authorized to perform: logs:CreateLogGroup`** — the task def's `awslogs-create-group: true` needs `logs:CreateLogGroup`, which the managed execution-role policy doesn't grant. Run the `put-role-policy` in [Step 5a-2](#step-5--worker-ecs-fargate). The service self-heals on the next task retry — no redeploy needed.
 - **`aws ecs create-express-gateway-service` stuck at PROVISIONING** — `--monitor-resources` prints exactly which sub-resource (target group, ALB, listener, service) is taking time. Most stalls are VPC-route issues; Option B (RDS) hits these when the service is created in a subnet without a route to the RDS subnet. Option A (Supabase) hits this rarely — the default-VPC config Express Mode picks works out-of-the-box for public-internet egress.
-- **`AccessDeniedException` on `iam:PassRole`** — your deploy IAM user can pass the ExecutionRole and InfrastructureRole ARNs. Add an `iam:PassRole` statement scoped to those two role ARNs, or attach `AmazonECS_FullAccess` to the deploy user temporarily.
+- **`AccessDeniedException` on `iam:PassRole`** — the OIDC deploy role must be able to pass the ExecutionRole and InfrastructureRole ARNs. The setup script's `ECSExpressDeploy` policy already scopes `iam:PassRole` to those two role ARNs; if you see this, the roles didn't exist when the script ran — create them ([Step 4a](#4a--iam-roles-one-time)) and re-run the script.
 - **Express Mode service URL returns 503 with the task RUNNING (no stopped tasks)** — the ALB health check is failing, so the only target is marked unhealthy. The most common cause on the **GitHub Actions deploy path**: the `aws-actions/amazon-ecs-deploy-express-service` action doesn't expose a `health-check-path` input, so the ALB defaults to `/` — and the Flask app 404s on `/` unless it has a root route. The backend defines a lightweight `@app.route('/')` returning 200 (no DB) for exactly this; if you removed it, the 503 returns. (The manual CLI path in 4b sets `--health-check-path "/api/health"` instead.) Confirm `containerPort: 8000` matches Dockerfile.backend, and inspect with `aws ecs describe-express-gateway-service --service-arn ...`.
 - **Worker exits with `psycopg.OperationalError`** —
   - *Option A:* `DATABASE_URL` is wrong (most often you pasted the pooled URL on port 6543 and the worker needs the direct URL on 5432), or the password contains URL-unsafe characters that weren't percent-encoded.

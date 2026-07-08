@@ -9,9 +9,9 @@ name: deploy-frontend
 #
 # Prerequisites (one-time):
 #   - Frontend already deployed once manually (S3 bucket + CloudFront dist exist) — AWS_DEPLOYMENT.md Step 6
-#   - Deploy IAM user has S3 write + cloudfront:CreateInvalidation — AWS_DEPLOYMENT.md Step 6 (CI)
+#   - GitHub OIDC role (secret AWS_OIDC_ROLE_ARN) carries S3 write +
+#     cloudfront:CreateInvalidation — deploy/iam/setup-github-oidc.sh
 #   - Repo secrets: FRONTEND_S3_BUCKET, CLOUDFRONT_DISTRIBUTION_ID
-#     (plus AWS_ACCESS_KEY_ID / AWS_SECRET_ACCESS_KEY, already set)
 
 on:
   workflow_dispatch:
@@ -23,6 +23,7 @@ on:
 
 permissions:
   contents: read
+  id-token: write   # OIDC: mint the token exchanged for short-lived AWS creds
 
 concurrency:
   group: deploy-frontend-${{ github.ref }}
@@ -65,12 +66,11 @@ jobs:
           npm ci
           npm run build
 
-      - name: Configure AWS credentials
+      - name: Configure AWS credentials (OIDC)
         if: steps.guard.outputs.skip != 'true'
         uses: aws-actions/configure-aws-credentials@v4
         with:
-          aws-access-key-id: ${{ secrets.AWS_ACCESS_KEY_ID }}
-          aws-secret-access-key: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
+          role-to-assume: ${{ secrets.AWS_OIDC_ROLE_ARN }}
           aws-region: ${{ env.AWS_REGION }}
 
       - name: Sync to S3
