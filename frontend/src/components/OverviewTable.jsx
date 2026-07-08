@@ -101,4 +101,7 @@ function OverviewTable({ tickers }) {
   );
 }
 
-export default OverviewTable;
+// Memoized so the landing page's active-jobs poll (which re-renders Landing
+// every few seconds) doesn't re-render the whole table — including every
+// per-cell price sparkline — while `tickers` is unchanged.
+export default React.memo(OverviewTable);

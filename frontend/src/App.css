@@ -144,6 +144,55 @@ h1, h2, h3, h4 { margin: 0; font-weight: 600; color: var(--text-primary); }
 .landing__muted { color: var(--text-muted); padding: 12px 0; }
 .landing__error { color: var(--danger);     padding: 12px 0; }
 
+/* "Analyzing…" indicator: which (ticker, horizon) jobs are in flight. */
+.landing__active {
+  display: flex;
+  align-items: center;
+  flex-wrap: wrap;
+  gap: 8px;
+  margin-bottom: 20px;
+  padding: 10px 14px;
+  background: rgba(217, 119, 6, 0.08);
+  border: 1px solid rgba(217, 119, 6, 0.25);
+  border-radius: var(--radius);
+}
+.landing__active-spinner {
+  width: 13px;
+  height: 13px;
+  border: 2px solid rgba(217, 119, 6, 0.3);
+  border-top-color: var(--warning);
+  border-radius: 50%;
+  animation: spin 0.8s linear infinite;
+  flex: none;
+}
+.landing__active-label {
+  font-size: 12px;
+  font-weight: 600;
+  color: var(--warning);
+  text-transform: uppercase;
+  letter-spacing: 0.04em;
+}
+.landing__active-list { display: flex; flex-wrap: wrap; gap: 6px; }
+.landing__active-badge {
+  display: inline-flex;
+  align-items: center;
+  gap: 5px;
+  font-size: 12px;
+  font-weight: 600;
+  color: var(--warning);
+  background: rgba(217, 119, 6, 0.12);
+  border: 1px solid rgba(217, 119, 6, 0.3);
+  border-radius: 999px;
+  padding: 2px 9px;
+}
+.landing__active-badge-h {
+  font-size: 10px;
+  font-weight: 500;
+  text-transform: uppercase;
+  letter-spacing: 0.03em;
+  opacity: 0.75;
+}
+
 .ticker-grid {
   display: grid;
   grid-template-columns: repeat(auto-fill, minmax(220px, 1fr));

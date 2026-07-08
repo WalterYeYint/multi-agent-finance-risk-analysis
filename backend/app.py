@@ -19,7 +19,7 @@ from utils.horizons import get_horizon, HORIZONS
 from utils.snapshots import (
     get_latest_snapshot, is_fresh, list_snapshot_history, list_tracked_tickers,
     list_latest_snapshots_overview, get_or_create_pending_job, get_job,
-    get_latest_job, get_latest_prices, _sanitize_for_json,
+    get_latest_job, get_latest_prices, list_active_jobs, _sanitize_for_json,
 )
 from utils.prices import fetch_price_series_polygon, slice_period, PERIOD_TAIL
 
@@ -548,10 +548,21 @@ def overview():
             'cumulative_return': row.get('cumulative_return'),
             'generated_at': row['generated_at'].isoformat() if row.get('generated_at') else None,
         }
-    return jsonify({'tickers': [
-        {'ticker': ticker, 'horizons': horizons}
-        for ticker, horizons in sorted(by_ticker.items())
-    ]})
+    # In-flight jobs are volatile, so they bypass the 60s overview cache and are
+    # read fresh on every request (one small indexed query). This drives the
+    # landing page's "analyzing…" indicator for work currently in progress.
+    active = [
+        {'ticker': j['ticker'], 'horizon': j['horizon'], 'status': j['status']}
+        for j in list_active_jobs()
+        if j.get('horizon') in HORIZONS
+    ]
+    return jsonify({
+        'tickers': [
+            {'ticker': ticker, 'horizons': horizons}
+            for ticker, horizons in sorted(by_ticker.items())
+        ],
+        'active': active,
+    })
 
 
 @app.route('/api/tickers', methods=['GET'])
