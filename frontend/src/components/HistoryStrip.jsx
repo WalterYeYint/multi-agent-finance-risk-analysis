@@ -52,4 +52,6 @@ function HistoryStrip({ ticker, horizon, days = 90 }) {
   );
 }
 
-export default HistoryStrip;
+// Memoized for the same reason as PriceChart: the parent polls every ~3s and
+// re-renders, but this strip only depends on its stable primitive props.
+export default React.memo(HistoryStrip);

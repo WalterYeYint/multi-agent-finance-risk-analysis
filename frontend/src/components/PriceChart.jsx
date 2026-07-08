@@ -7,6 +7,25 @@ import { usePriceSeries } from '../hooks/usePriceSeries';
 const PERIOD_BY_HORIZON = { SHORT: '1mo', MID: '6mo', LONG: '2y' };
 const HORIZON_LABEL = { SHORT: 'Short — 1 month', MID: 'Mid — 6 months', LONG: 'Long — 2 years' };
 
+// Cap the number of points actually handed to Recharts. The LONG horizon is a
+// ~2y *daily* series (~500 points); reconciling that many SVG vertices on every
+// parent re-render (the TickerView polls all three horizons every 3s) is what
+// made the chart lag. Uniformly striding down to ~MAX_POINTS keeps the line
+// visually identical at chart resolution while cutting reconciliation cost.
+const MAX_POINTS = 180;
+
+function downsample(series) {
+  if (series.length <= MAX_POINTS) return series;
+  const stride = Math.ceil(series.length / MAX_POINTS);
+  const out = [];
+  for (let i = 0; i < series.length; i += stride) out.push(series[i]);
+  // Always keep the last point so the headline "last price" lines up with the
+  // right edge of the line.
+  const last = series[series.length - 1];
+  if (out[out.length - 1] !== last) out.push(last);
+  return out;
+}
+
 function formatDate(d, period) {
   if (!d) return '';
   // YYYY-MM-DD → DD MMM (1mo / 6mo) or MMM yyyy (2y) for axis compactness.
@@ -36,16 +55,26 @@ function PriceChart({ ticker, horizon }) {
   const { series, loading, error } = usePriceSeries(ticker, period);
 
   // Compute return over the period for the header — single source of truth
-  // for the chart's headline metric.
+  // for the chart's headline metric. Derived from the full series (not the
+  // downsampled one) so first/last/min/max stay exact.
   const stats = useMemo(() => {
     if (!series.length) return null;
     const first = series[0].close;
     const last = series[series.length - 1].close;
     const change = (last - first) / first;
-    const min = Math.min(...series.map((p) => p.close));
-    const max = Math.max(...series.map((p) => p.close));
+    let min = Infinity;
+    let max = -Infinity;
+    for (const p of series) {
+      if (p.close < min) min = p.close;
+      if (p.close > max) max = p.close;
+    }
     return { first, last, change, min, max };
   }, [series]);
+
+  // The series actually rendered by Recharts, memoized so the (potentially
+  // ~500-point) transform runs only when the fetched series changes, not on
+  // every parent re-render.
+  const chartSeries = useMemo(() => downsample(series), [series]);
 
   return (
     <div className="price-chart">
@@ -78,7 +107,7 @@ function PriceChart({ ticker, horizon }) {
         )}
         {!loading && !error && series.length > 0 && (
           <ResponsiveContainer width="100%" height={260}>
-            <LineChart data={series} margin={{ top: 10, right: 12, left: 0, bottom: 0 }}>
+            <LineChart data={chartSeries} margin={{ top: 10, right: 12, left: 0, bottom: 0 }}>
               <CartesianGrid stroke="var(--border)" strokeDasharray="3 3" vertical={false} />
               <XAxis
                 dataKey="date"
@@ -115,4 +144,7 @@ function PriceChart({ ticker, horizon }) {
   );
 }
 
-export default PriceChart;
+// Memoized: the parent TickerView re-renders every ~3s while its snapshot
+// poll loops run, but PriceChart's props (ticker, horizon) are stable strings,
+// so there is no reason to re-render (and re-reconcile the Recharts SVG) then.
+export default React.memo(PriceChart);
