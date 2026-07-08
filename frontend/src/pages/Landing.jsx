@@ -3,10 +3,32 @@ import { useNavigate } from 'react-router-dom';
 import { Search } from 'lucide-react';
 import axios from 'axios';
 import { useOverview } from '../hooks/useOverview';
+import { useActiveJobs } from '../hooks/useActiveJobs';
 import OverviewTable from '../components/OverviewTable';
+
+const HORIZON_LABEL = { SHORT: 'Short', MID: 'Mid', LONG: 'Long' };
+
+function ActiveJobsStrip({ active }) {
+  if (!active.length) return null;
+  return (
+    <div className="landing__active">
+      <span className="landing__active-spinner" aria-hidden="true" />
+      <span className="landing__active-label">Analyzing</span>
+      <div className="landing__active-list">
+        {active.map((j) => (
+          <span key={`${j.ticker}-${j.horizon}`} className="landing__active-badge">
+            {j.ticker}
+            <span className="landing__active-badge-h">{HORIZON_LABEL[j.horizon] || j.horizon}</span>
+          </span>
+        ))}
+      </div>
+    </div>
+  );
+}
 
 function Landing() {
   const { tickers, loading, error } = useOverview();
+  const { active } = useActiveJobs();
   const [query, setQuery] = useState('');
   const [checking, setChecking] = useState(false);
   const [lookupError, setLookupError] = useState('');
@@ -69,6 +91,8 @@ function Landing() {
       </form>
 
       {lookupError && <div className="landing__error">{lookupError}</div>}
+
+      <ActiveJobsStrip active={active} />
 
       {loading && <div className="landing__muted">Loading tickers…</div>}
       {error && <div className="landing__error">Couldn't load tickers: {error}</div>}

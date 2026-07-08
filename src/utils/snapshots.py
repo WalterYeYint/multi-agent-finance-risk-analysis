@@ -319,6 +319,21 @@ def enqueue_stale_refreshes() -> int:
     return stale
 
 
+def list_active_jobs() -> list[dict]:
+    """Every in-flight (queued or running) job, newest first. Read-only, one
+    small indexed query — powers the landing page's "analyzing…" indicator so
+    users can see which (ticker, horizon) pairs are currently being computed."""
+    ensure_schema()
+    with connect() as conn, conn.cursor() as cur:
+        cur.execute(
+            f"SELECT {', '.join(_JOB_COLS)} FROM jobs "
+            "WHERE status IN ('queued', 'running') "
+            "ORDER BY requested_at DESC"
+        )
+        rows = cur.fetchall()
+    return [_job_row_to_dict(r) for r in rows]
+
+
 def get_job(job_id: int) -> Optional[dict]:
     ensure_schema()
     with connect() as conn, conn.cursor() as cur:
