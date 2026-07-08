@@ -19,9 +19,11 @@ e.g. `docker run -e POSTGRES_PASSWORD=finance -e POSTGRES_USER=finance \
 from __future__ import annotations
 
 import os
+import re
 
 try:
     import psycopg
+    from psycopg import sql
     from pgvector.psycopg import register_vector
 except ImportError as e:  # pragma: no cover - clear message if deps missing
     raise ImportError(
@@ -34,8 +36,11 @@ except ImportError as e:  # pragma: no cover - clear message if deps missing
 # The `embedding` column is an unconstrained `vector`, so chunks embedded by
 # different providers (OpenAI 1536-d, Ollama 768-d, mock 16-d) can coexist.
 # Retrieval always filters by `embedding_model`, so distance ops only ever
-# compare same-dimension vectors. With a small corpus a sequential scan is
-# fine; add an HNSW index per fixed dimension later if the corpus grows.
+# compare same-dimension vectors. Because the column is dimensionless, a plain
+# `CREATE INDEX ... USING hnsw (embedding vector_cosine_ops)` is impossible
+# (HNSW needs a fixed dimension). Instead `ensure_ann_indexes()` builds one
+# PARTIAL HNSW index per distinct `embedding_model` over the fixed-dimension
+# expression `embedding::vector(N)` — see that function below.
 SCHEMA_DDL = """
 CREATE EXTENSION IF NOT EXISTS vector;
 
@@ -136,7 +141,80 @@ CREATE UNIQUE INDEX IF NOT EXISTS jobs_pending_uniq
     ON jobs (ticker, horizon) WHERE status IN ('queued', 'running');
 """
 
+# HNSW build parameters for the ANN indexes on `filing_chunks.embedding`.
+# These are pgvector's own defaults and a sensible balance of build time, index
+# size and recall for a filings corpus (≲10^6 vectors):
+#   m               = max edges per node in the graph. Higher → better recall &
+#                     bigger/slower-to-build index. 16 is the standard sweet spot.
+#   ef_construction = candidate-list size while building. Higher → better recall
+#                     at higher build cost. 64 is the default.
+# Query-time recall/latency is tuned separately and at runtime via
+# `SET hnsw.ef_search = N` (default 40); it is NOT baked into the index, so it
+# needs no rebuild to change. Bump ef_search if recall on the ANN path is low.
+HNSW_M = 16
+HNSW_EF_CONSTRUCTION = 64
+
 _schema_ready = False
+
+
+def _index_suffix(embedding_model: str) -> str:
+    """Sanitise an embedding_model tag into a safe SQL identifier suffix.
+
+    Tags look like 'openai:text-embedding-ada-002-1536d' / 'ollama:nomic-embed-text-768d'
+    / 'mock-16d'; collapse everything non-alphanumeric to underscores.
+    """
+    return re.sub(r"[^0-9a-z]+", "_", embedding_model.lower()).strip("_") or "unknown"
+
+
+def ensure_ann_indexes(cur: "psycopg.Cursor") -> None:
+    """Create a per-embedding_model HNSW cosine index on `filing_chunks`.
+
+    Runs on an already-open cursor (inside the caller's transaction). Idempotent:
+    every index is created `IF NOT EXISTS`, so this is cheap to call repeatedly.
+
+    Why one index per embedding_model instead of a single table-wide index:
+    `filing_chunks.embedding` is a dimensionless `vector` on purpose, so vectors
+    from different providers (1536-d / 768-d / 16-d) share the table. pgvector's
+    HNSW requires a *fixed* dimension, so a single index over the raw column is
+    not possible. We therefore build one PARTIAL index per distinct
+    `embedding_model`, keyed on the expression `embedding::vector(N)` (N = that
+    model's actual dimension, read from the data via `vector_dims`) and scoped by
+    `WHERE embedding_model = '<model>'`.
+
+    This matches `retrieve_relevant_chunks`, which (a) always filters
+    `embedding_model = <active>` and (b) orders by cosine distance `<=>`, so
+    `vector_cosine_ops` is the correct operator class and exactly one partial
+    index is eligible per query. The retrieval SQL casts its ORDER BY expression
+    to the same `::vector(N)` so the planner can match this expression index.
+    """
+    # One representative row per model is enough to learn its dimension.
+    cur.execute(
+        "SELECT embedding_model, vector_dims(embedding) AS dim FROM ("
+        "  SELECT DISTINCT ON (embedding_model) embedding_model, embedding"
+        "  FROM filing_chunks ORDER BY embedding_model"
+        ") s"
+    )
+    for embedding_model, dim in cur.fetchall():
+        if not dim or dim <= 0:
+            continue
+        index_name = f"filing_chunks_hnsw_{_index_suffix(embedding_model)}"
+        # NB: the partial predicate must be a literal (index predicates cannot be
+        # parameterised), so `embedding_model` is inlined via sql.Literal — safe
+        # against injection and correct quoting. `dim` is an int from the DB.
+        cur.execute(
+            sql.SQL(
+                "CREATE INDEX IF NOT EXISTS {name} ON filing_chunks "
+                "USING hnsw ((embedding::vector({dim})) vector_cosine_ops) "
+                "WITH (m = {m}, ef_construction = {efc}) "
+                "WHERE embedding_model = {model}"
+            ).format(
+                name=sql.Identifier(index_name),
+                dim=sql.SQL(str(int(dim))),
+                m=sql.SQL(str(HNSW_M)),
+                efc=sql.SQL(str(HNSW_EF_CONSTRUCTION)),
+                model=sql.Literal(embedding_model),
+            )
+        )
 
 
 def get_conninfo() -> str:
@@ -208,5 +286,9 @@ def ensure_schema(force: bool = False) -> None:
     with connect(register_types=False) as conn:
         with conn.cursor() as cur:
             cur.execute(SCHEMA_DDL)
+            # Build ANN indexes for whatever embedding models already have data.
+            # (A model ingested for the first time later in this process gets its
+            # index from ingestion's own ensure_ann_indexes call — see rag_utils.)
+            ensure_ann_indexes(cur)
         conn.commit()
     _schema_ready = True
