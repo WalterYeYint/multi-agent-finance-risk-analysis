@@ -158,9 +158,14 @@ def get_available_models():
         current_model = os.getenv('OLLAMA_MODEL', 'llama3.2:3b')  # match config.get_llm default
         description = 'Local Ollama model'
         models = [current_model]
+    elif provider == 'bedrock':
+        # match config.get_llm default
+        current_model = os.getenv('BEDROCK_MODEL_ID', 'us.anthropic.claude-sonnet-4-5-20250929-v1:0')
+        description = 'AWS Bedrock model'
+        models = [current_model]
     else:
         return jsonify({
-            'error': f"Unknown MODEL_PROVIDER: {raw_provider}. Must be 'openai' or 'ollama'."
+            'error': f"Unknown MODEL_PROVIDER: {raw_provider}. Must be 'openai', 'ollama', or 'bedrock'."
         }), 400
 
     return jsonify({
@@ -184,6 +189,9 @@ def get_active_model():
     elif provider == 'ollama':
         model = os.getenv('OLLAMA_MODEL', 'llama3.2:3b')
         label = f'Ollama · {model}'
+    elif provider == 'bedrock':
+        model = os.getenv('BEDROCK_MODEL_ID', 'us.anthropic.claude-sonnet-4-5-20250929-v1:0')
+        label = f'Bedrock · {model}'
     else:
         model = provider
         label = provider

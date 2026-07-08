@@ -30,6 +30,14 @@ try:
 except ImportError:
     ChatOllama = None
 
+try:
+    # ChatBedrockConverse uses Bedrock's Converse API (preferred over the older
+    # ChatBedrock/InvokeModel path). Credentials come from the default AWS chain
+    # (env vars, shared config, or — in prod — the ECS task role from I19).
+    from langchain_aws import ChatBedrockConverse
+except ImportError:
+    ChatBedrockConverse = None
+
 # Import embedding providers
 try:
     from langchain_openai import OpenAIEmbeddings
@@ -41,6 +49,11 @@ try:
     from langchain_ollama import OllamaEmbeddings
 except ImportError:
     OllamaEmbeddings = None
+
+try:
+    from langchain_aws import BedrockEmbeddings
+except ImportError:
+    BedrockEmbeddings = None
 
 def get_llm(temperature: float = 0.1, model_provider: str = "auto", max_tokens=16000):
     """
@@ -168,7 +181,38 @@ def get_llm(temperature: float = 0.1, model_provider: str = "auto", max_tokens=1
             ollama_model = os.getenv("OLLAMA_MODEL", "llama3.2:3b")
             print(f"   And model is available: ollama pull {ollama_model}")
             # Fall through to mock LLM
-    
+
+    elif model_provider == "bedrock":
+        # AWS Bedrock — keeps inference inside the user's AWS account/region
+        # (pairs with the Bedrock task role from I19). Explicit opt-in only:
+        # Bedrock is never selected by `auto`, so default behavior is unchanged.
+        if not ChatBedrockConverse:
+            print("❌ Bedrock provider requested but langchain-aws is not installed.")
+            print("   Run: pip install langchain-aws")
+            # Fall through to mock LLM
+        else:
+            # A current Claude model on Bedrock. Cross-region inference profiles
+            # carry a region prefix (e.g. us.anthropic.…); override per account.
+            bedrock_model = os.getenv(
+                "BEDROCK_MODEL_ID",
+                "us.anthropic.claude-sonnet-4-5-20250929-v1:0",
+            )
+            region = os.getenv("AWS_REGION") or os.getenv("AWS_DEFAULT_REGION")
+            print("🤖 Using AWS Bedrock models")
+            print(f"   Model: {bedrock_model}")
+            try:
+                return ChatBedrockConverse(
+                    model=bedrock_model,
+                    region_name=region,
+                    temperature=temperature,
+                    max_tokens=max_tokens,
+                )
+            except Exception as e:
+                print(f"❌ Failed to initialise Bedrock client: {e}")
+                print("   Ensure AWS credentials/region are configured and the "
+                      "model id is enabled in your account.")
+                # Fall through to mock LLM
+
     # Fall back to enhanced mock for development/testing
     print("⚠️  No API keys found - using mock LLM for testing")
     print("   To use actual agents, set one of:")
@@ -261,7 +305,18 @@ def get_embeddings(model_provider: str = "auto"):
             embed_model = os.getenv("OLLAMA_EMBED_MODEL", "nomic-embed-text")
             print(f"   And embedding model is available: ollama pull {embed_model}")
             # Fall through to mock embeddings
-    
+
+    elif model_provider == "bedrock" and BedrockEmbeddings:
+        print("🔍 Using AWS Bedrock embeddings")
+        try:
+            bedrock_embed_model = os.getenv("BEDROCK_EMBED_MODEL_ID", "amazon.titan-embed-text-v2:0")
+            region = os.getenv("AWS_REGION") or os.getenv("AWS_DEFAULT_REGION")
+            print(f"   Embedding Model: {bedrock_embed_model}")
+            return BedrockEmbeddings(model_id=bedrock_embed_model, region_name=region)
+        except Exception as e:
+            print(f"❌ Failed to initialise Bedrock embeddings: {e}")
+            # Fall through to mock embeddings
+
     # Fall back to mock embeddings for development/testing
     print("⚠️  No embeddings provider found - RAG functionality will be limited")
     print("   To use RAG features, set:")
