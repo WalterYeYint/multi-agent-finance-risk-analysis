@@ -21,7 +21,7 @@ from langchain_core.documents import Document
 from langchain_text_splitters import RecursiveCharacterTextSplitter
 
 from utils.config import get_embeddings
-from utils.db import connect, ensure_schema
+from utils.db import connect, ensure_schema, ensure_ann_indexes
 
 
 def _normalize_filing_type(filing_type: str) -> str:
@@ -206,6 +206,12 @@ class FundamentalRAG:
                         "(SELECT count(*) FROM filing_chunks WHERE filing_id = %s) "
                         "WHERE id = %s",
                         (filing_id, filing_id))
+                    # Ensure the HNSW ANN index for this embedding_model exists.
+                    # ensure_schema() only builds indexes for models that already
+                    # had data at process start; the first filing ingested under a
+                    # new provider mid-process would otherwise stay unindexed until
+                    # restart. IF NOT EXISTS makes this a no-op once built.
+                    ensure_ann_indexes(cur)
                 conn.commit()
 
             print(f"✅ Ingested {len(chunks)} chunks for {ticker} {filing_type} "
@@ -285,9 +291,20 @@ class FundamentalRAG:
 
     # --------------------------------------------------------------- retrieve
     @staticmethod
-    def _build_search_sql(filing_type: Optional[str]) -> str:
+    def _build_search_sql(filing_type: Optional[str],
+                          embedding_dim: Optional[int] = None) -> str:
         """Cosine-distance search SQL. A filing matches if its coverage period
-        overlaps [from_date, to_date]: period_end >= from AND period_start <= to."""
+        overlaps [from_date, to_date]: period_end >= from AND period_start <= to.
+
+        When `embedding_dim` is known (>0), the ORDER BY expression is cast to
+        `embedding::vector(N)` so it matches the partial HNSW expression index
+        built by db.ensure_ann_indexes (which indexes `embedding::vector(N)` per
+        embedding_model). The `embedding_model` filter above narrows to exactly
+        the one index whose dimension is N, so the planner can use it instead of a
+        sequential scan. With no known dimension we fall back to the raw column
+        (correct, but a seq scan). N comes from a trusted int probe, not input."""
+        order_expr = (f"c.embedding::vector({int(embedding_dim)})"
+                      if embedding_dim and embedding_dim > 0 else "c.embedding")
         sql = [
             "SELECT c.content, c.metadata",
             "FROM filing_chunks c",
@@ -299,7 +316,7 @@ class FundamentalRAG:
         ]
         if filing_type:
             sql.append("  AND f.filing_type = %(filing_type)s")
-        sql.append("ORDER BY c.embedding <=> %(qvec)s")
+        sql.append(f"ORDER BY {order_expr} <=> %(qvec)s")
         sql.append("LIMIT %(k)s")
         return "\n".join(sql)
 
@@ -348,7 +365,7 @@ class FundamentalRAG:
         to_date = to_date or date.today()
 
         vectors = self.embeddings.embed_documents(list(queries))
-        sql = self._build_search_sql(filing_type)
+        sql = self._build_search_sql(filing_type, self.embedding_dim)
         base_params: Dict[str, Any] = {
             "ticker": ticker.upper(),
             "model": self.embedding_model,
