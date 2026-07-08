@@ -185,3 +185,4 @@ zipp==3.23.0
 zstandard==0.25.0
 boto3
 langchain-mcp-adapters==0.3.0
+langchain-aws
