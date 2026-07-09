@@ -91,6 +91,20 @@ export function useAllSnapshots(ticker, { intervalMs = 3000 } = {}) {
         timers[horizon] = setTimeout(() => pollOne(horizon), intervalMs);
       } catch (e) {
         if (cancelled) return;
+        // Definitive enqueue rejections from I1 (auth / rate limit) carry an
+        // explicit code. Surface them right away instead of treating the 401/429
+        // as a transient gateway blip to retry through.
+        const code = e?.response?.data?.code;
+        if (code === 'unauthorized' || code === 'rate_limited') {
+          setByHorizon((prev) => ({
+            ...prev,
+            [horizon]: {
+              snapshot: null, pending: null, job: null,
+              error: e?.response?.data?.error || 'Request rejected.', status: 'error',
+            },
+          }));
+          return;
+        }
         // A transient gateway blip while a job is in flight: keep the current
         // view (loading/pending — no setState) and keep polling, backing off a
         // little to let the gateway recover. Only after MAX_TRANSIENT in a row

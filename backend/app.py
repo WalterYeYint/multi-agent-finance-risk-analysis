@@ -3,6 +3,7 @@ from flask_cors import CORS
 import sys
 import os
 import re
+import time
 import traceback
 import requests
 import io
@@ -19,7 +20,8 @@ from utils.horizons import get_horizon, HORIZONS
 from utils.snapshots import (
     get_latest_snapshot, is_fresh, list_snapshot_history, list_tracked_tickers,
     list_latest_snapshots_overview, get_or_create_pending_job, get_job,
-    get_latest_job, get_latest_prices, list_active_jobs, _sanitize_for_json,
+    get_latest_job, get_latest_prices, list_active_jobs, find_pending_job,
+    _sanitize_for_json,
 )
 from utils.prices import fetch_price_series_polygon, slice_period, PERIOD_TAIL
 
@@ -91,6 +93,92 @@ def _clean_ticker(raw):
                      '(letters, digits, . or -) starting with a letter.'
         }), 400)
     return t, None
+
+
+# --- I1: API auth + enqueue rate limiting -----------------------------------
+# Only the *enqueue* (job-creation) path is protected; reads and polls of cached
+# snapshots stay open, so the public read/poll UX is unchanged. This is a
+# deliberate choice over route-level rate limiting: the client polls
+# GET /api/snapshot every ~3s, so limiting the route would throttle legitimate
+# polling. The expensive, abusable action is *creating a new job*, so that is the
+# only thing gated (see _resolve_snapshot).
+#
+# Both controls are opt-in / safe by default:
+#   • API-key auth is enforced ONLY when API_KEYS is set (comma-separated).
+#     With no keys configured (e.g. local dev) enqueues are allowed unauthenticated.
+#   • The per-identity enqueue rate limit always applies — keyed by API key when
+#     present, else client IP — as baseline cost/DoS protection. Set
+#     ENQUEUE_RATE_LIMIT_PER_HOUR=0 to disable.
+
+_enqueue_hits = {}          # identity -> [monotonic timestamps within the window]
+_enqueue_lock = Lock()
+
+
+def _configured_api_keys():
+    return {k.strip() for k in os.getenv('API_KEYS', '').split(',') if k.strip()}
+
+
+def _request_api_key():
+    """Extract the caller's API key from 'Authorization: Bearer <k>' or 'X-API-Key'."""
+    auth = request.headers.get('Authorization', '')
+    if auth[:7].lower() == 'bearer ':
+        return auth[7:].strip()
+    return (request.headers.get('X-API-Key') or '').strip()
+
+
+def _enqueue_identity():
+    """Rate-limit bucket: the API key if provided, else the client IP (first
+    X-Forwarded-For hop behind the ALB/CloudFront, falling back to remote_addr)."""
+    key = _request_api_key()
+    if key:
+        return f'key:{key}'
+    fwd = request.headers.get('X-Forwarded-For', '')
+    ip = fwd.split(',')[0].strip() if fwd else (request.remote_addr or 'unknown')
+    return f'ip:{ip}'
+
+
+def _enqueue_rate_limited():
+    """Return retry_after seconds if the caller is over their enqueue quota, else 0.
+    Sliding 1-hour window kept in-process (adequate for the single-process
+    gthread server; a shared store would be needed for multi-process/replica)."""
+    limit = int(os.getenv('ENQUEUE_RATE_LIMIT_PER_HOUR', '30'))
+    if limit <= 0:
+        return 0
+    window = 3600.0
+    now = time.monotonic()
+    ident = _enqueue_identity()
+    with _enqueue_lock:
+        hits = [t for t in _enqueue_hits.get(ident, []) if now - t < window]
+        if len(hits) >= limit:
+            _enqueue_hits[ident] = hits
+            return int(window - (now - hits[0])) + 1
+        hits.append(now)
+        _enqueue_hits[ident] = hits
+        return 0
+
+
+def _authorize_enqueue():
+    """Guard the job-creation path. Returns None if allowed, else (response, status).
+
+    Auth is enforced only when API_KEYS is configured; the enqueue rate limit
+    always applies. Call this ONLY when a genuinely new job is about to be
+    created — never on the poll/dedup path, or a client's own polling of an
+    in-flight job would burn its quota."""
+    keys = _configured_api_keys()
+    if keys and _request_api_key() not in keys:
+        return jsonify({
+            'error': 'Unauthorized: a valid API key is required to start an analysis.',
+            'code': 'unauthorized',
+        }), 401
+    retry_after = _enqueue_rate_limited()
+    if retry_after:
+        return jsonify({
+            'error': 'Rate limit exceeded: too many analyses requested. '
+                     'Please wait before starting another.',
+            'code': 'rate_limited',
+            'retry_after': retry_after,
+        }), 429
+    return None
 
 
 def _detect_model_provider():
@@ -243,6 +331,7 @@ def _serialize_snapshot(snap: dict, *, cached: bool) -> dict:
         'fundamental': snap.get('fundamental'),
         'valuation': snap.get('valuation'),
         'metrics': snap.get('metrics'),
+        'insights': snap.get('insights'),
         'debate': {'consensus_summary': debate.get('consensus_summary')} if debate else None,
         'agent_arguments': debate.get('agent_arguments'),
         'report': {
@@ -409,6 +498,14 @@ def _resolve_snapshot(ticker: str, horizon, *, force: bool = False):
             'code': 'unknown_ticker',
         }), 404
 
+    # If a job is already in flight for this pair, this poll is just checking on
+    # it — return it WITHOUT the enqueue guard. The expensive work was already
+    # authorized when the job was created, and gating here would make a client's
+    # own 3s polling burn its rate-limit quota (I1).
+    existing = find_pending_job(ticker, horizon.name)
+    if existing is not None:
+        return _job_response(existing)
+
     # Surface a recent failure instead of re-enqueuing it forever. A failed job
     # is terminal (it no longer blocks create_job's dedup), so without this the
     # next poll would silently start a fresh job and the client would spin
@@ -418,6 +515,12 @@ def _resolve_snapshot(ticker: str, horizon, *, force: bool = False):
         latest = get_latest_job(ticker, horizon.name)
         if latest and latest['status'] == 'failed':
             return _job_response(latest)
+
+    # Genuinely new work is about to be created → require auth (if configured)
+    # and apply the per-identity enqueue rate limit. This is the only gated path.
+    guard = _authorize_enqueue()
+    if guard is not None:
+        return guard
 
     job = get_or_create_pending_job(ticker, horizon.name)
     return _job_response(job)
