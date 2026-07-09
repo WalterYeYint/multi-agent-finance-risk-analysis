@@ -184,5 +184,6 @@ yfinance==0.2.66
 zipp==3.23.0
 zstandard==0.25.0
 boto3
+botocore[crt]  # crt extra: needed for the AWS SSO login credential provider (local dev with `aws configure sso`); harmless in prod (ECS task role uses container creds)
 langchain-mcp-adapters==0.3.0
 langchain-aws

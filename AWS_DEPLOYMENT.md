@@ -682,6 +682,51 @@ nimbusquant.tech.   A       18.67.93.11, 18.67.93.25, …       ← Cloudflare-r
 
 ---
 
+## (Optional) Using AWS Bedrock as the LLM provider [N3]
+
+By default the stack talks to OpenAI (or Ollama). Set `MODEL_PROVIDER=bedrock` to route inference through **Amazon Bedrock** instead, keeping the LLM calls inside your AWS account/region. Bedrock is **opt-in only** — it is never selected by `MODEL_PROVIDER=auto`, so leaving this unset changes nothing.
+
+Inference runs in the **worker** container (the pipeline is where the LLM is invoked), so the Bedrock permissions belong on a **task role** attached to the worker task definition. This is a *different* role from `ecsTaskExecutionRole` (Step 4a): the execution role only pulls the image + reads secrets at startup; the **task role** is what the running container assumes to call AWS APIs.
+
+**1. Enable model access (console, one-time).** In the [Bedrock console](https://console.aws.amazon.com/bedrock/) → *Model access*, request access to the model you'll use (default: Claude Sonnet 4.5). New accounts don't have it on by default, and without it every invoke returns `AccessDeniedException` (the app then falls back to `MockLLM`). Confirm the model id is offered in your `AWS_REGION`.
+
+**2. Create the task role + attach the invoke policy.** Both policy files are in [`deploy/iam/`](deploy/iam/):
+
+```bash
+cd deploy/iam
+# Trust: let the ECS tasks service assume the role
+aws iam create-role --role-name financeAgentsTaskRole \
+  --assume-role-policy-document file://ecs-task-trust.json
+# Permission: bedrock:InvokeModel(+WithResponseStream), scoped to anthropic.* + inference profiles
+aws iam put-role-policy --role-name financeAgentsTaskRole \
+  --policy-name BedrockInvoke --policy-document file://bedrock-task-role-policy.json
+
+export TASK_ROLE_ARN=$(aws iam get-role --role-name financeAgentsTaskRole --query 'Role.Arn' --output text)
+```
+> Tighten `Resource` in `bedrock-task-role-policy.json` to the exact model IDs you invoke before using this in anger — the shipped policy uses `anthropic.*` / `inference-profile/*` wildcards.
+
+**3. Wire the role into the worker task definition.** Add `"taskRoleArn": "<TASK_ROLE_ARN>"` alongside the existing `"executionRoleArn"` in `task-worker.json` (Step 5b), then register a new revision and roll the service (Step 5d). The Bedrock provider auto-picks up credentials from the ECS task role via the default AWS chain — **no keys in env**.
+
+**4. Set the env vars** (worker, and the backend too if you want its model badge to read "bedrock"):
+
+| Var | Required? | Default | Notes |
+|---|---|---|---|
+| `MODEL_PROVIDER` | **yes** | — | must be exactly `bedrock` |
+| `AWS_REGION` | yes | — | region where Bedrock + the model are available (e.g. `us-east-2`) |
+| `BEDROCK_MODEL_ID` | no | `us.anthropic.claude-sonnet-4-5-20250929-v1:0` | cross-region inference profile; must be enabled in your account |
+| `BEDROCK_EMBED_MODEL_ID` | no | `amazon.titan-embed-text-v2:0` | only if you also want Bedrock **embeddings** for RAG |
+
+**5. Dependency.** The image needs `langchain-aws` (already in `requirements.txt`). If it's missing at runtime the provider prints `❌ Bedrock provider requested but langchain-aws is not installed.` and falls back to `MockLLM` — it won't crash, but you'll get mock output, so verify the worker log prints `🤖 Using AWS Bedrock models` on startup.
+
+**Local smoke test** (uses your `aws configure` creds instead of the task role):
+```bash
+pip install langchain-aws
+export MODEL_PROVIDER=bedrock AWS_REGION=us-east-2
+python -m backend.app     # expect "🤖 Using AWS Bedrock models" in the console
+```
+
+---
+
 ## Environment variables
 
 Set on **both** the Express Mode service (via `--primary-container '...environment...'` at create time, or `aws ecs update-express-gateway-service` later) and the Fargate worker task definition unless noted.

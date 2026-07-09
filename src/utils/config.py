@@ -35,8 +35,31 @@ try:
     # ChatBedrock/InvokeModel path). Credentials come from the default AWS chain
     # (env vars, shared config, or — in prod — the ECS task role from I19).
     from langchain_aws import ChatBedrockConverse
+    from botocore.config import Config as _BotoConfig
 except ImportError:
     ChatBedrockConverse = None
+    _BotoConfig = None
+
+
+def _bedrock_boto_config():
+    """botocore Config for the Bedrock client.
+
+    The default botocore read_timeout is 60s — too short for a large-context
+    Converse generation (Claude Sonnet 4.5 with a full ReAct history can take
+    minutes to return the first byte), which otherwise surfaces as a raw
+    `HTTPClientError: An HTTP Client raised an unhandled exception` (a urllib3
+    ReadTimeoutError under the hood). Bump read_timeout and add adaptive retries
+    so a slow/throttled call is retried rather than crashing the agent. Tunable
+    via BEDROCK_READ_TIMEOUT / BEDROCK_MAX_RETRIES.
+    """
+    if _BotoConfig is None:
+        return None
+    return _BotoConfig(
+        connect_timeout=int(os.getenv("BEDROCK_CONNECT_TIMEOUT", "10")),
+        read_timeout=int(os.getenv("BEDROCK_READ_TIMEOUT", "300")),
+        retries={"max_attempts": int(os.getenv("BEDROCK_MAX_RETRIES", "3")),
+                 "mode": "adaptive"},
+    )
 
 # Import embedding providers
 try:
@@ -206,6 +229,7 @@ def get_llm(temperature: float = 0.1, model_provider: str = "auto", max_tokens=1
                     region_name=region,
                     temperature=temperature,
                     max_tokens=max_tokens,
+                    config=_bedrock_boto_config(),
                 )
             except Exception as e:
                 print(f"❌ Failed to initialise Bedrock client: {e}")
@@ -312,7 +336,8 @@ def get_embeddings(model_provider: str = "auto"):
             bedrock_embed_model = os.getenv("BEDROCK_EMBED_MODEL_ID", "amazon.titan-embed-text-v2:0")
             region = os.getenv("AWS_REGION") or os.getenv("AWS_DEFAULT_REGION")
             print(f"   Embedding Model: {bedrock_embed_model}")
-            return BedrockEmbeddings(model_id=bedrock_embed_model, region_name=region)
+            return BedrockEmbeddings(model_id=bedrock_embed_model, region_name=region,
+                                     config=_bedrock_boto_config())
         except Exception as e:
             print(f"❌ Failed to initialise Bedrock embeddings: {e}")
             # Fall through to mock embeddings
