@@ -12,7 +12,7 @@ from utils.constants import RISK_SYSTEM, SENTIMENT_SYSTEM, VALUATION_SYSTEM, FUN
 from utils.schemas import (
     MarketData, NewsBundle, NewsItem, RiskMetrics, RiskReport,
     SentimentSummary, SentimentExtract, ValuationMetrics,
-    FundamentalAnalysis, FundamentalExtract, DebateReport
+    FundamentalAnalysis, FundamentalExtract, DebateReport, PublicInsights
 )
 from utils.rag_utils import FundamentalRAG
 from utils.mcp_tools import load_sec_mcp_tools
@@ -71,6 +71,7 @@ class State(BaseModel):
     metrics: Optional[RiskMetrics] = None
     report: Optional[RiskReport] = None
     debate: Optional[DebateReport] = None
+    insights: Optional[PublicInsights] = None
     end_date: Optional[str] = None
 
 

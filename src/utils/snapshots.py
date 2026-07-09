@@ -27,7 +27,7 @@ from utils.horizons import HORIZONS, Horizon, HorizonName
 _SNAPSHOT_COLS = (
     "id", "ticker", "horizon", "generated_at",
     "sentiment", "fundamental", "valuation", "metrics", "debate",
-    "report_markdown", "cost_usd", "latency_ms", "prices",
+    "report_markdown", "cost_usd", "latency_ms", "prices", "insights",
 )
 
 
@@ -75,8 +75,8 @@ def save_snapshot(*, ticker: str, horizon: HorizonName, state: Any,
         cur.execute(
             """INSERT INTO snapshots
                (ticker, horizon, sentiment, fundamental, valuation, metrics,
-                debate, report_markdown, cost_usd, latency_ms, prices)
-               VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
+                debate, report_markdown, cost_usd, latency_ms, prices, insights)
+               VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
                RETURNING id""",
             (
                 ticker.upper(), horizon,
@@ -87,6 +87,7 @@ def save_snapshot(*, ticker: str, horizon: HorizonName, state: Any,
                 _to_jsonb(getattr(state, "debate", None)),
                 state.report.markdown_report if getattr(state, "report", None) else None,
                 cost_usd, latency_ms, prices_jsonb,
+                _to_jsonb(getattr(state, "insights", None)),
             ),
         )
         snapshot_id = cur.fetchone()[0]

@@ -164,3 +164,56 @@ class DebateReport(BaseModel):
     consensus_summary: str = ""
     terminated: str = ""
     markdown_report: str = ""
+
+
+# --- N2: public-analyzer insights -------------------------------------------
+# Public-stock-analyzer-style metrics surfaced alongside the multi-agent report.
+# All fields Optional/defaulted: any metric whose inputs are unavailable is left
+# None (the pipeline computes best-effort and never fails on a missing input).
+
+class TechnicalSignals(BaseModel):
+    """Price-derived momentum/technical signals (from the Polygon daily series)."""
+    as_of: Optional[str] = None
+    last_close: Optional[float] = None
+    sma_50: Optional[float] = None
+    sma_200: Optional[float] = None
+    pct_vs_sma_50: Optional[float] = None      # % above/below the 50-day SMA
+    pct_vs_sma_200: Optional[float] = None
+    trend: Optional[str] = None                # golden_cross | death_cross | uptrend | downtrend | neutral
+    rsi_14: Optional[float] = None
+    rsi_zone: Optional[str] = None             # overbought | oversold | neutral
+    high_52w: Optional[float] = None
+    low_52w: Optional[float] = None
+    pct_from_52w_high: Optional[float] = None  # negative = below the 52w high
+    pct_from_52w_low: Optional[float] = None
+    return_1m: Optional[float] = None          # trailing returns, as fractions
+    return_3m: Optional[float] = None
+    return_6m: Optional[float] = None
+    return_1y: Optional[float] = None
+    momentum: Optional[str] = None             # strong_up | up | flat | down | strong_down
+
+
+class ValuationRatios(BaseModel):
+    """Fundamental valuation ratios from SEC XBRL (companyfacts) + latest price."""
+    as_of_fy: Optional[int] = None             # fiscal year the fundamentals are from
+    currency: str = "USD"
+    price: Optional[float] = None
+    market_cap: Optional[float] = None
+    eps_diluted: Optional[float] = None
+    revenue: Optional[float] = None
+    net_income: Optional[float] = None
+    pe_ratio: Optional[float] = None
+    ps_ratio: Optional[float] = None
+    net_margin: Optional[float] = None         # net income / revenue
+    roe: Optional[float] = None                # net income / shareholders' equity
+    debt_to_equity: Optional[float] = None     # total liabilities / equity (approx)
+    source: Optional[str] = None               # e.g. "SEC XBRL companyfacts", else None
+    notes: StrList = Field(default_factory=list)  # e.g. which ratios were omitted + why
+
+
+class PublicInsights(BaseModel):
+    ticker: str = ""
+    technical: Optional[TechnicalSignals] = None
+    valuation: Optional[ValuationRatios] = None
+    analyst_summary: str = ""                   # LLM plain-English synthesis (grounded on the above)
+    generated_at: Optional[str] = None

@@ -113,6 +113,8 @@ CREATE TABLE IF NOT EXISTS snapshots (
 
 -- Idempotent migration for snapshots created before the `prices` column existed.
 ALTER TABLE snapshots ADD COLUMN IF NOT EXISTS prices JSONB;
+-- N2: public-analyzer insights (technical/valuation/analyst summary) per snapshot.
+ALTER TABLE snapshots ADD COLUMN IF NOT EXISTS insights JSONB;
 
 CREATE INDEX IF NOT EXISTS snapshots_lookup_idx
     ON snapshots (ticker, horizon, generated_at DESC);

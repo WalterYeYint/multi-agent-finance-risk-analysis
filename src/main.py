@@ -158,6 +158,22 @@ def run_pipeline_for_horizon(
     # and it degrades to [] gracefully when POLYGON_API_KEY is missing.
     prices = fetch_price_series_polygon(ticker, years=2.0)
 
+    # N2: public-analyzer insights (technical/momentum from the price series,
+    # valuation ratios from SEC XBRL, plus a short grounded LLM summary). Computed
+    # here in the worker so it's persisted with the snapshot and off the request
+    # path. Best-effort: build_insights swallows its own errors, so a failure here
+    # never breaks the snapshot write.
+    _progress("insights")
+    try:
+        from utils.insights import build_insights
+        rec = (final.debate.consensus_summary if final.debate else "") or ""
+        final.insights = build_insights(
+            ticker, prices=prices,
+            price_csv=(final.market.price_csv if final.market else None),
+            recommendation=rec[:600])
+    except Exception as e:  # noqa: BLE001
+        print(f"⚠️  insights step skipped for {ticker}: {e}")
+
     snapshot_id: Optional[int] = None
     if persist:
         snapshot_id = save_snapshot(
