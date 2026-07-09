@@ -1,27 +1,10 @@
 import React from 'react';
 import { CheckCircle2, Loader2, AlertCircle, Clock } from 'lucide-react';
+import { pickRecommendation, recTagClass as tagClass } from '../utils/recommendation';
 
 const HORIZONS = ['SHORT', 'MID', 'LONG'];
-const PERIOD_LABEL = { SHORT: '1mo', MID: '6mo', LONG: '2y' };
-
-function pickRecommendation(text) {
-  if (!text || typeof text !== 'string') return null;
-  // The debate's consensus_summary embeds the BUY/HOLD/SELL token. We scan in
-  // priority order — explicit "SELL" wins over "BUY" if both appear, because
-  // recommendations are usually negated ("avoid a BUY") more than promoted.
-  const upper = text.toUpperCase();
-  if (/\bSELL\b/.test(upper)) return 'SELL';
-  if (/\bBUY\b/.test(upper)) return 'BUY';
-  if (/\bHOLD\b/.test(upper)) return 'HOLD';
-  return null;
-}
-
-function tagClass(rec) {
-  if (rec === 'BUY') return 'tag tag--positive';
-  if (rec === 'SELL') return 'tag tag--negative';
-  if (rec === 'HOLD') return 'tag tag--neutral';
-  return 'tag';
-}
+// Lookback → forecast, so the strip tells the user what each horizon means.
+const PERIOD_LABEL = { SHORT: '1mo → 7d', MID: '6mo → 30d', LONG: '2y → 90d' };
 
 function pct(v) {
   return typeof v === 'number' && Number.isFinite(v) ? `${(v * 100).toFixed(1)}%` : '—';

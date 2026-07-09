@@ -4,6 +4,7 @@ import { Loader2 } from 'lucide-react';
 const PHASE_COPY = {
   analyzing: 'Running the chain agents (data → sentiment ‖ valuation ‖ fundamental → risk → writer)…',
   debating: 'Running the round-robin debate to converge on a recommendation…',
+  insights: 'Computing public-analyzer insights (technical signals + valuation ratios)…',
   queued: 'Job is queued — the worker will pick it up shortly.',
   running: 'Pipeline is running.',
 };

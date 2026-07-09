@@ -1,6 +1,8 @@
 import React from 'react';
 import ReactMarkdown from 'react-markdown';
 import { Download, FileText } from 'lucide-react';
+import InsightsPanel from './InsightsPanel';
+import { pickRecommendation, recTone } from '../utils/recommendation';
 
 function pct(v, digits = 1) {
   return typeof v === 'number' && Number.isFinite(v) ? `${(v * 100).toFixed(digits)}%` : '—';
@@ -54,6 +56,7 @@ function SnapshotView({ snapshot }) {
   const debate = snapshot.debate || {};
   const report = snapshot.report || {};
   const flags = Array.isArray(metrics.risk_flags) ? metrics.risk_flags : [];
+  const rec = pickRecommendation(debate.consensus_summary);
 
   return (
     <div className="snapshot">
@@ -79,11 +82,23 @@ function SnapshotView({ snapshot }) {
         )}
       </div>
 
-      {/* Recommendation / debate consensus */}
-      {debate.consensus_summary && (
-        <section className="snapshot__section">
-          <h3 className="snapshot__h3">Investment recommendation</h3>
-          <p className="snapshot__consensus">{debate.consensus_summary}</p>
+      {/* Recommendation / debate consensus — prominent color-coded verdict (N1) */}
+      {(rec || debate.consensus_summary) && (
+        <section className="snapshot__section rec-hero">
+          <div className={`rec-hero__badge rec-hero__badge--${recTone(rec) || 'neutral'}`}>
+            <span className="rec-hero__verdict">{rec || 'N/A'}</span>
+            <span className="rec-hero__caption">recommendation</span>
+          </div>
+          <div className="rec-hero__body">
+            <h3 className="snapshot__h3">Investment recommendation</h3>
+            {debate.consensus_summary ? (
+              <p className="snapshot__consensus">{debate.consensus_summary}</p>
+            ) : (
+              <p className="snapshot__consensus snapshot__muted">
+                No consensus summary was produced for this run.
+              </p>
+            )}
+          </div>
         </section>
       )}
 
@@ -117,6 +132,9 @@ function SnapshotView({ snapshot }) {
           </div>
         )}
       </section>
+
+      {/* N2: public-analyzer insights (technical/momentum + valuation ratios) */}
+      <InsightsPanel insights={snapshot.insights} />
 
       {/* Investment recommendation from sentiment + fundamental */}
       {(sentiment.investment_recommendation || sentiment.summary) && (

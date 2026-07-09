@@ -347,13 +347,47 @@ h1, h2, h3, h4 { margin: 0; font-weight: 600; color: var(--text-primary); }
 .snapshot__list li { margin-bottom: 4px; }
 .snapshot__two-col { display: grid; grid-template-columns: 1fr 1fr; gap: 16px; }
 .snapshot__flags { margin-top: 12px; display: flex; gap: 6px; flex-wrap: wrap; }
+
+/* N2: public-analyzer insights */
+.insights__block { margin-top: 14px; }
+.insights__block .snapshot__h4 { display: inline-flex; align-items: center; gap: 6px; }
+.insights__notes { font-size: 12px; color: var(--text-secondary); margin: 8px 0 0; font-style: italic; }
+.insights__source { font-size: 11px; color: var(--text-secondary); margin: 4px 0 0; opacity: 0.8; }
 .snapshot__report { background: var(--surface); border: 1px solid var(--border); border-radius: var(--radius); padding: 14px 18px; box-shadow: var(--shadow); }
 .snapshot__report summary { cursor: pointer; font-weight: 600; display: inline-flex; align-items: center; gap: 6px; }
 .snapshot__markdown { margin-top: 12px; font-size: 13.5px; line-height: 1.6; color: var(--text-primary); }
 .snapshot__markdown h1, .snapshot__markdown h2, .snapshot__markdown h3 { margin-top: 14px; margin-bottom: 8px; }
 .snapshot__markdown table { border-collapse: collapse; }
 .snapshot__markdown table th, .snapshot__markdown table td { border: 1px solid var(--border); padding: 4px 8px; }
-.snapshot__error { background: rgba(220, 38, 38, 0.08); border: 1px solid rgba(220, 38, 38, 0.3); color: var(--danger); padding: 12px 14px; border-radius: var(--radius); }
+.snapshot__error { display: flex; align-items: flex-start; gap: 12px; background: rgba(220, 38, 38, 0.08); border: 1px solid rgba(220, 38, 38, 0.3); color: var(--danger); padding: 14px 16px; border-radius: var(--radius); }
+.snapshot__error-icon { flex: 0 0 auto; margin-top: 1px; }
+.snapshot__error-body { flex: 1 1 auto; min-width: 0; }
+.snapshot__error-title { font-weight: 600; margin-bottom: 2px; }
+.snapshot__error-msg { color: var(--text-secondary); font-size: 0.9rem; word-break: break-word; }
+.snapshot__error .snapshot__retry { flex: 0 0 auto; padding: 6px 14px; font-size: 0.85rem; }
+
+/* Recommendation hero (N1): prominent color-coded BUY/HOLD/SELL verdict. */
+.rec-hero { display: flex; align-items: center; gap: 18px; }
+.rec-hero__badge { flex: 0 0 auto; display: flex; flex-direction: column; align-items: center; justify-content: center;
+  min-width: 108px; padding: 14px 18px; border-radius: 14px; border: 1px solid var(--border); }
+.rec-hero__verdict { font-size: 26px; font-weight: 800; letter-spacing: 0.02em; line-height: 1; }
+.rec-hero__caption { font-size: 10px; text-transform: uppercase; letter-spacing: 0.08em; margin-top: 5px; opacity: 0.8; }
+.rec-hero__badge--positive { background: rgba(15, 157, 88, 0.12);  color: var(--success); border-color: rgba(15, 157, 88, 0.35); }
+.rec-hero__badge--negative { background: rgba(220, 38, 38, 0.12);  color: var(--danger);  border-color: rgba(220, 38, 38, 0.35); }
+.rec-hero__badge--neutral  { background: var(--brand-soft);        color: var(--brand);   border-color: rgba(79, 70, 229, 0.3); }
+.rec-hero__body { flex: 1 1 auto; min-width: 0; }
+.snapshot__muted { color: var(--text-muted); font-style: italic; }
+
+/* Loading skeleton (N1): shimmer placeholder while a horizon snapshot loads. */
+.snapshot__skeleton { display: flex; flex-direction: column; gap: 12px; }
+.snapshot__skeleton-grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(150px, 1fr)); gap: 10px; }
+.snapshot__skeleton-bar, .snapshot__skeleton-cell {
+  background: linear-gradient(90deg, var(--surface-soft) 25%, var(--border) 37%, var(--surface-soft) 63%);
+  background-size: 400% 100%; animation: snapshot-shimmer 1.4s ease infinite; border-radius: 8px;
+}
+.snapshot__skeleton-bar { height: 20px; }
+.snapshot__skeleton-cell { height: 56px; }
+@keyframes snapshot-shimmer { 0% { background-position: 100% 0; } 100% { background-position: 0 0; } }
 
 .snapshot__failed { background: rgba(220, 38, 38, 0.08); border: 1px solid rgba(220, 38, 38, 0.3); padding: 18px 16px; border-radius: var(--radius); text-align: center; }
 .snapshot__failed-title { color: var(--danger); font-weight: 600; margin-bottom: 6px; }
@@ -606,4 +640,10 @@ td.overview-table__spark { height: 36px; padding-top: 4px; padding-bottom: 4px; 
   .price-chart__head-right { text-align: left; }
   /* Overview table: drop the sparkline columns, keep ticker + the 3 pills. */
   .overview-table__spark { display: none; }
+  /* Recommendation hero: stack the badge above the summary on narrow screens. */
+  .rec-hero { flex-direction: column; align-items: stretch; gap: 12px; }
+  .rec-hero__badge { flex-direction: row; gap: 10px; min-width: 0; justify-content: flex-start; }
+  .rec-hero__caption { margin-top: 0; align-self: center; }
+  .snapshot__error { flex-wrap: wrap; }
+  .snapshot__error .snapshot__retry { margin-left: auto; }
 }
