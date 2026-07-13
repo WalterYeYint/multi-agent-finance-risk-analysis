@@ -1,5 +1,4 @@
 {
-  "_comment": "I19 — least-privilege TASK role for the ECS backend/worker once N3 (Bedrock LLM provider) lands. This is the role the CONTAINER assumes at runtime (distinct from ecsTaskExecutionRole, which only pulls images + reads secrets at start). Attach as the task definition's `taskRoleArn`. Scope Resource to the exact model IDs you invoke instead of the wildcards below. Apply with: aws iam create-role --role-name financeAgentsTaskRole --assume-role-policy-document file://ecs-task-trust.json ; aws iam put-role-policy --role-name financeAgentsTaskRole --policy-name BedrockInvoke --policy-document file://bedrock-task-role-policy.json",
   "Version": "2012-10-17",
   "Statement": [
     {

@@ -1,5 +1,4 @@
 {
-  "_comment": "Trust policy for financeAgentsTaskRole — the ECS TASK role the container assumes at runtime (holds Bedrock invoke perms from bedrock-task-role-policy.json). Lets the ECS tasks service principal assume this role. Distinct from ecsTaskExecutionRole's trust (same principal, different role/perms). Apply with: aws iam create-role --role-name financeAgentsTaskRole --assume-role-policy-document file://ecs-task-trust.json",
   "Version": "2012-10-17",
   "Statement": [
     {
