@@ -95,6 +95,21 @@ def save_snapshot(*, ticker: str, horizon: HorizonName, state: Any,
     return snapshot_id
 
 
+def total_cost_last_24h() -> float:
+    """Sum of cost_usd across snapshots generated in the last 24 hours (rolling
+    window — no timezone/midnight ambiguity). Drives the worker's
+    DAILY_COST_BUDGET_USD gate. Under-counts by whatever FAILED runs spent
+    (their cost is never persisted) — acceptable for a soft daily brake; the
+    hard per-run stop is RUN_TOKEN_BUDGET (cost_meter.py)."""
+    ensure_schema()
+    with connect() as conn, conn.cursor() as cur:
+        cur.execute(
+            "SELECT COALESCE(SUM(cost_usd), 0) FROM snapshots "
+            "WHERE generated_at >= now() - interval '24 hours'"
+        )
+        return float(cur.fetchone()[0] or 0.0)
+
+
 def get_latest_snapshot(ticker: str, horizon: HorizonName) -> Optional[dict]:
     """Return the most recent snapshot row for (ticker, horizon), or None."""
     ensure_schema()

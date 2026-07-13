@@ -713,7 +713,7 @@ export TASK_ROLE_ARN=$(aws iam get-role --role-name financeAgentsTaskRole --quer
 |---|---|---|---|
 | `MODEL_PROVIDER` | **yes** | — | must be exactly `bedrock` |
 | `AWS_REGION` | yes | — | region where Bedrock + the model are available (e.g. `us-east-2`) |
-| `BEDROCK_MODEL_ID` | no | `us.anthropic.claude-sonnet-4-5-20250929-v1:0` | cross-region inference profile; must be enabled in your account |
+| `BEDROCK_MODEL_ID` | no | `us.anthropic.claude-haiku-4-5-20251001-v1:0` | cross-region inference profile; must be enabled in your account |
 | `BEDROCK_EMBED_MODEL_ID` | no | `amazon.titan-embed-text-v2:0` | only if you also want Bedrock **embeddings** for RAG |
 
 **5. Dependency.** The image needs `langchain-aws` (already in `requirements.txt`). If it's missing at runtime the provider prints `❌ Bedrock provider requested but langchain-aws is not installed.` and falls back to `MockLLM` — it won't crash, but you'll get mock output, so verify the worker log prints `🤖 Using AWS Bedrock models` on startup.

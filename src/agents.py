@@ -253,9 +253,16 @@ def fundamental_agent(state: State, config: RunnableConfig):
             "strings."
         )
 
+        # The tool-call cap in the prompt keeps thorough models (Claude on
+        # Bedrock explored 11+ query_10k_documents calls unconstrained, each a
+        # slow non-streaming round-trip) to a few batched retrievals. Each call
+        # already supports many comma-separated sub-queries, so evidence
+        # coverage is preserved. GPT-4o made only 1–2 calls anyway, so the cap
+        # is a no-op for it.
         query_msg = f"""
     Please analyze {state.ticker} using the 10-K/10-Q documents from month:{from_month}, year:{from_year} to month:{to_month}, year:{to_year}.
     When calling the query_10k_documents tool, pass your queries as a comma-separated string like this: "financial metrics, business segments, risk factors, competitive position, growth prospects, investment thesis, concerns and risks"
+    IMPORTANT: Call query_10k_documents AT MOST 2 times in total — batch all related questions into each call as one comma-separated string (a single call supports many sub-queries), then write your final analysis from the evidence you already have.
     Cover the executive summary, key financial metrics, business highlights, risk factors, competitive position, growth prospects, a 0-10 financial health score, an investment thesis, and concerns/risks.
     """
 

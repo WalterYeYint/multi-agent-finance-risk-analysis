@@ -78,19 +78,37 @@ try:
 except ImportError:
     BedrockEmbeddings = None
 
+def _with_meter(llm, model_id: str):
+    """Attach the cost-metering callback (utils/cost_meter.py) to a chat model.
+
+    Constructor-level callbacks fire on every call of the instance — including
+    through create_agent / with_structured_output — regardless of whether
+    RunnableConfig propagates, so this is the one reliable attachment point.
+    Metering is read-only (token counts into RUN_METER); it changes no model
+    behavior. The only behavioral effect is the opt-in RUN_TOKEN_BUDGET ceiling,
+    which is off by default."""
+    try:
+        from utils.cost_meter import UsageCallback
+        existing = list(llm.callbacks or []) if getattr(llm, "callbacks", None) else []
+        llm.callbacks = existing + [UsageCallback(model_id)]
+    except Exception as e:  # noqa: BLE001 — metering must never block an LLM
+        print(f"⚠️  cost meter not attached ({model_id}): {e}")
+    return llm
+
+
 def get_llm(temperature: float = 0.1, model_provider: str = "auto", max_tokens=16000):
     """
     Get an actual LLM instance based on available API keys and preferences.
-    
+
     Args:
         temperature: Controls randomness in responses (0.0 = deterministic, 1.0 = creative)
         model_provider: Preferred provider ("openai", "anthropic", "google", "ollama", "auto")
                        Can also be set via MODEL_PROVIDER environment variable
-    
+
     Returns:
         An actual LLM instance for the sentiment agent and other components
     """
-    
+
     # Check for model provider from environment variable
     env_provider = os.getenv("MODEL_PROVIDER", "").lower()
     if env_provider and model_provider == "auto":
@@ -102,33 +120,33 @@ def get_llm(temperature: float = 0.1, model_provider: str = "auto", max_tokens=1
         # Check for OpenAI API key
         if os.getenv("OPENAI_API_KEY") and ChatOpenAI:
             print("🤖 Using OpenAI GPT models")
-            return ChatOpenAI(
+            return _with_meter(ChatOpenAI(
                 # model="gpt-3.5-turbo",  # Cost-effective option
                 model="gpt-4o",
                 temperature=temperature,
                 max_tokens=max_tokens,
                 max_retries=int(os.getenv("LLM_MAX_RETRIES", "3")),
-            )
+            ), "gpt-4o")
 
         # Check for Anthropic API key
         elif os.getenv("ANTHROPIC_API_KEY") and ChatAnthropic:
             print("🤖 Using Anthropic Claude models")
-            return ChatAnthropic(
+            return _with_meter(ChatAnthropic(
                 model="claude-3-haiku-20240307",  # Fast and cost-effective
                 temperature=temperature,
                 max_tokens=max_tokens,
                 max_retries=int(os.getenv("LLM_MAX_RETRIES", "3")),
-            )
+            ), "claude-3-haiku")
 
         # Check for Google API key
         elif os.getenv("GOOGLE_API_KEY") and ChatGoogleGenerativeAI:
             print("🤖 Using Google Gemini models")
-            return ChatGoogleGenerativeAI(
+            return _with_meter(ChatGoogleGenerativeAI(
                 model="gemini-pro",
                 temperature=temperature,
                 max_output_tokens=max_tokens,
                 max_retries=int(os.getenv("LLM_MAX_RETRIES", "3")),
-            )
+            ), "gemini-pro")
 
         # Check for local Ollama installation
         elif ChatOllama:
@@ -144,7 +162,7 @@ def get_llm(temperature: float = 0.1, model_provider: str = "auto", max_tokens=1
                 )
                 # Test the connection by trying a simple generation
                 # llm.invoke("test")
-                return llm
+                return _with_meter(llm, ollama_model)
             except Exception as e:
                 print(f"❌ Failed to connect to Ollama: {e}")
                 print("   Make sure Ollama is running: ollama serve")
@@ -159,30 +177,30 @@ def get_llm(temperature: float = 0.1, model_provider: str = "auto", max_tokens=1
         if not openai_key:
             raise RuntimeError("OpenAI provider requested but OPENAI_API_KEY is not set.")
         print("🤖 Using OpenAI GPT models")
-        return ChatOpenAI(
+        return _with_meter(ChatOpenAI(
             model="gpt-4o",  # Primary target model
             temperature=temperature,
             max_tokens=max_tokens,
             max_retries=int(os.getenv("LLM_MAX_RETRIES", "3")),
-        )
+        ), "gpt-4o")
 
     elif model_provider == "anthropic" and os.getenv("ANTHROPIC_API_KEY") and ChatAnthropic:
         print("🤖 Using Anthropic Claude models")
-        return ChatAnthropic(
+        return _with_meter(ChatAnthropic(
             model="claude-3-haiku-20240307",
             temperature=temperature,
             max_tokens=max_tokens,
             max_retries=int(os.getenv("LLM_MAX_RETRIES", "3")),
-        )
+        ), "claude-3-haiku")
 
     elif model_provider == "google" and os.getenv("GOOGLE_API_KEY") and ChatGoogleGenerativeAI:
         print("🤖 Using Google Gemini models")
-        return ChatGoogleGenerativeAI(
+        return _with_meter(ChatGoogleGenerativeAI(
             model="gemini-pro",
             temperature=temperature,
             max_output_tokens=max_tokens,
             max_retries=int(os.getenv("LLM_MAX_RETRIES", "3")),
-        )
+        ), "gemini-pro")
     
     elif model_provider == "ollama" and ChatOllama:
         print("🤖 Using local Ollama models")
@@ -197,7 +215,7 @@ def get_llm(temperature: float = 0.1, model_provider: str = "auto", max_tokens=1
             )
             # Test the connection by trying a simple generation
             llm.invoke("test")
-            return llm
+            return _with_meter(llm, ollama_model)
         except Exception as e:
             print(f"❌ Failed to connect to Ollama: {e}")
             print("   Make sure Ollama is running: ollama serve")
@@ -218,19 +236,19 @@ def get_llm(temperature: float = 0.1, model_provider: str = "auto", max_tokens=1
             # carry a region prefix (e.g. us.anthropic.…); override per account.
             bedrock_model = os.getenv(
                 "BEDROCK_MODEL_ID",
-                "us.anthropic.claude-sonnet-4-5-20250929-v1:0",
+                "us.anthropic.claude-haiku-4-5-20251001-v1:0",
             )
             region = os.getenv("AWS_REGION") or os.getenv("AWS_DEFAULT_REGION")
             print("🤖 Using AWS Bedrock models")
             print(f"   Model: {bedrock_model}")
             try:
-                return ChatBedrockConverse(
+                return _with_meter(ChatBedrockConverse(
                     model=bedrock_model,
                     region_name=region,
                     temperature=temperature,
                     max_tokens=max_tokens,
                     config=_bedrock_boto_config(),
-                )
+                ), bedrock_model)
             except Exception as e:
                 print(f"❌ Failed to initialise Bedrock client: {e}")
                 print("   Ensure AWS credentials/region are configured and the "

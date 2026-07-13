@@ -248,7 +248,7 @@ def get_available_models():
         models = [current_model]
     elif provider == 'bedrock':
         # match config.get_llm default
-        current_model = os.getenv('BEDROCK_MODEL_ID', 'us.anthropic.claude-sonnet-4-5-20250929-v1:0')
+        current_model = os.getenv('BEDROCK_MODEL_ID', 'us.anthropic.claude-haiku-4-5-20251001-v1:0')
         description = 'AWS Bedrock model'
         models = [current_model]
     else:
@@ -278,7 +278,7 @@ def get_active_model():
         model = os.getenv('OLLAMA_MODEL', 'llama3.2:3b')
         label = f'Ollama · {model}'
     elif provider == 'bedrock':
-        model = os.getenv('BEDROCK_MODEL_ID', 'us.anthropic.claude-sonnet-4-5-20250929-v1:0')
+        model = os.getenv('BEDROCK_MODEL_ID', 'us.anthropic.claude-haiku-4-5-20251001-v1:0')
         label = f'Bedrock · {model}'
     else:
         model = provider

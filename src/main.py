@@ -122,6 +122,14 @@ def run_pipeline_for_horizon(
             "which produces placeholder output — refusing to persist a fake analysis. "
             "Set OPENAI_API_KEY or start Ollama (or set ALLOW_MOCK_LLM=1 to override).")
 
+    # Cost metering: every LLM constructed by get_llm() reports token usage into
+    # the process-global RUN_METER (utils/cost_meter.py). Reset per run; the
+    # total is persisted as the snapshot's cost_usd. RUN_TOKEN_BUDGET (opt-in)
+    # makes the meter raise mid-run if a run blows past its token ceiling —
+    # the worker then marks the job failed with that reason.
+    from utils.cost_meter import RUN_METER
+    RUN_METER.reset()
+
     h = get_horizon(horizon_name)
     chain = build_chain_graph()
     state = State(
@@ -146,7 +154,11 @@ def run_pipeline_for_horizon(
     debate_graph = build_final_recommendation_graph()
     final.debate = DebateReport(
         agent_list=["fundamental", "sentiment", "valuation"])
-    final.debate.agent_max_turn = 5
+    # DEBATE_MAX_TURNS: per-specialist turn cap (default 2 — measured: 3 turns on
+    # Bedrock/Sonnet took 1274s and ~$1.43 for one MID run; the roadmap's own
+    # debate assessment notes extra rounds add rhetoric, not evidence). Raise it
+    # to trade wall-clock/cost for more debate.
+    final.debate.agent_max_turn = int(os.getenv("DEBATE_MAX_TURNS", "2"))
     final = State(**debate_graph.invoke(
         final, config=RunnableConfig(recursion_limit=100)))
     latency_ms = int((time.time() - t0) * 1000)
@@ -174,11 +186,20 @@ def run_pipeline_for_horizon(
     except Exception as e:  # noqa: BLE001
         print(f"⚠️  insights step skipped for {ticker}: {e}")
 
+    # Persist the run's real LLM spend (exact token counts × $/Mtok pricing).
+    usage = RUN_METER.snapshot()
+    if usage["calls"]:
+        print(f"💰 run cost: ${usage['cost_usd']:.4f} "
+              f"({usage['input_tokens']:,} in / {usage['output_tokens']:,} out "
+              f"tokens over {usage['calls']} LLM calls)")
+
     snapshot_id: Optional[int] = None
     if persist:
         snapshot_id = save_snapshot(
             ticker=ticker, horizon=h.name, state=final,
-            latency_ms=latency_ms, cost_usd=None, prices=prices)
+            latency_ms=latency_ms,
+            cost_usd=usage["cost_usd"] if usage["calls"] else None,
+            prices=prices)
     return final, snapshot_id
 
 

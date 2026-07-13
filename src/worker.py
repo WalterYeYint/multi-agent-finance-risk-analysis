@@ -38,13 +38,45 @@ from utils.db import ensure_schema  # noqa: E402
 from utils.edgar_ingest import refresh_tracked_filings  # noqa: E402
 from utils.snapshots import (  # noqa: E402
     claim_next_job, enqueue_stale_refreshes, list_tracked_tickers,
-    update_job_status,
+    total_cost_last_24h, update_job_status,
 )
 
 POLL_SECONDS = int(os.getenv("WORKER_POLL_SECONDS", "3"))
 REFRESH_SCAN_SECONDS = int(os.getenv("WORKER_REFRESH_SCAN_SECONDS", "300"))
 # Weekly sweep: re-check every tracked ticker for NEW SEC filings (default 7 days).
 FILING_SCAN_SECONDS = int(os.getenv("WORKER_FILING_SCAN_SECONDS", str(7 * 24 * 3600)))
+# Soft daily LLM-spend brake: if the last 24h of persisted snapshot costs exceed
+# this, the worker pauses (jobs stay queued) instead of claiming. 0 = disabled.
+DAILY_COST_BUDGET_USD = float(os.getenv("DAILY_COST_BUDGET_USD", "0"))
+# Don't hammer the cost query on every idle poll — re-check every minute.
+_BUDGET_CHECK_SECONDS = 60.0
+
+
+def _over_daily_budget(state: dict) -> bool:
+    """True when the rolling-24h spend exceeds DAILY_COST_BUDGET_USD. Caches the
+    DB read for _BUDGET_CHECK_SECONDS; fails open (a broken cost query must not
+    stop the worker). Logs once per transition into the paused state."""
+    if DAILY_COST_BUDGET_USD <= 0:
+        return False
+    now = time.time()
+    if now - state.get("checked_at", 0) >= _BUDGET_CHECK_SECONDS:
+        try:
+            state["spend"] = total_cost_last_24h()
+        except Exception as e:  # noqa: BLE001
+            print(f"⚠️  daily-budget check failed (ignoring): {e}", flush=True)
+            state["spend"] = 0.0
+        state["checked_at"] = now
+    over = state["spend"] >= DAILY_COST_BUDGET_USD
+    if over and not state.get("paused"):
+        print(f"⏸️  daily LLM budget reached: ${state['spend']:.2f} spent in the "
+              f"last 24h (DAILY_COST_BUDGET_USD={DAILY_COST_BUDGET_USD:.2f}). "
+              f"Pausing job claims; queued jobs will resume as spend rolls off.",
+              flush=True)
+    elif not over and state.get("paused"):
+        print(f"▶️  daily LLM budget recovered (${state['spend']:.2f} in last 24h) "
+              f"— resuming job claims.", flush=True)
+    state["paused"] = over
+    return over
 
 
 def process_job(job: dict) -> None:
@@ -73,8 +105,16 @@ def main() -> int:
           f"filing-scan={FILING_SCAN_SECONDS}s). Ctrl-C to stop.", flush=True)
     last_scan = 0.0
     last_filing_scan = 0.0
+    budget_state: dict = {}
     try:
         while True:
+            # Daily spend brake (opt-in): while over budget, don't claim — jobs
+            # stay queued (clients keep seeing 202/pending) and claims resume
+            # automatically as the rolling 24h window drains.
+            if _over_daily_budget(budget_state):
+                time.sleep(POLL_SECONDS)
+                continue
+
             # claim_next_job() hits the DB; a transient failure here is OUTSIDE
             # process_job's try/except, so guard it too — a pooler blip must not
             # kill the worker loop. retry_call inside connect() already retries
