@@ -240,7 +240,7 @@ jobs:
           execution-role-arn: ${{ env.ECS_EXEC_ROLE_ARN }}
           infrastructure-role-arn: ${{ env.ECS_INFRA_ROLE_ARN }}
           container-port: 8000
-          environment-variables: '[{"name":"MODEL_PROVIDER","value":"openai"}]'
+          environment-variables: '[{"name":"MODEL_PROVIDER","value":"bedrock"}]'
           secrets: '[{"name":"DATABASE_URL","valueFrom":"${{ env.DATABASE_URL_SECRET_ARN }}"},{"name":"OPENAI_API_KEY","valueFrom":"${{ env.OPENAI_KEY_SECRET_ARN }}"},{"name":"POLYGON_API_KEY","valueFrom":"${{ env.POLYGON_KEY_SECRET_ARN }}"}]'
 
       - name: Skip backend deploy (not fully configured)
