@@ -752,7 +752,7 @@ Set on **both** the Express Mode service (via `--primary-container '...environme
 | `DATABASE_URL` | both | Supabase: `postgresql://postgres.<ref>:<pw>@aws-0-<region>.pooler.supabase.com:5432/postgres`. RDS: `postgresql://finance:…@$DB_HOST:5432/finance_rag`. |
 | `OPENAI_API_KEY` | worker (backend uses it for the legacy `/api/analyze`) | If unset, both fall back to Ollama or `MockLLM` — useless in prod. |
 | `MODEL_PROVIDER` | both | `openai` for production. `auto` works but is fragile. |
-| `SEC_USER_AGENT` | worker | Real contact string. SEC rate-limits anonymous traffic. |
+| `SEC_USER_AGENT` | **both** | Real contact string. SEC rate-limits anonymous traffic. Worker: EDGAR filing ingest. **Backend: the ticker front-door validation fetches SEC's ticker→CIK map — without this it permanently fails open on AWS and unknown tickers (e.g. ZZZZZ) get enqueued.** Backend gets it from the `SEC_USER_AGENT` repo secret via `build-and-push.yml`. |
 | `POLYGON_API_KEY` | **worker + backend** | Worker: real news (else synthetic). Backend: powers `/api/price` (the chart). Both via Secrets Manager `valueFrom`. Without it: synthetic news + empty price charts (no crash). |
 | `ANALYZE_TIMEOUT_SECS` | backend | Default 900. |
 | `WORKER_POLL_SECONDS` | worker | Default 3. |
@@ -882,3 +882,4 @@ aws ecr delete-repository --repository-name $PROJECT-worker  --force
 - **`/api/snapshot/...` returns 202 forever** — worker isn't draining. Most common cause: ECS service desired-count is 0, or the task is stuck pulling the image. Check `aws ecs describe-services` and the task's CloudWatch logs.
 - **Backend image fails to run from Apple Silicon push** — you skipped `--platform linux/amd64` on the `docker buildx` command. The image will be `arm64`-only and Fargate (x86_64 by default) rejects it.
 - **SEC EDGAR returns 403 / rate-limit** — `SEC_USER_AGENT` is unset or generic. Set it to a real `Name <email>` string and redeploy the worker.
+- **Unknown tickers (e.g. ZZZZZ) get accepted and enqueued in prod** — the backend's ticker validation fetches SEC's ticker→CIK map at request time; if `SEC_USER_AGENT` is missing from the *backend* env, SEC blocks the datacenter request and validation fails open (backend logs show `⚠️ ticker validation skipped (SEC map unavailable)`). Add the `SEC_USER_AGENT` repo secret (wired through `build-and-push.yml`) and redeploy the backend.

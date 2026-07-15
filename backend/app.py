@@ -412,15 +412,31 @@ def _known_tickers() -> frozenset:
     return frozenset(load_cik_map().keys())
 
 
+_last_good_tickers = None  # last successfully-fetched SEC map (survives cache expiry)
+
+
 def _ticker_is_known(ticker: str) -> bool:
-    """True if `ticker` is a recognized SEC filer. Fails OPEN (returns True) when
-    the SEC ticker map can't be loaded, so a network blip never blocks a valid
-    lookup — the pipeline's own no-filings handling is the backstop."""
+    """True if `ticker` is a recognized SEC filer.
+
+    On SEC fetch failure, falls back to the LAST successfully-fetched map (a
+    stale map is far better than no validation — new listings are rare), and
+    only fails OPEN (returns True) when no map has ever loaded in this process,
+    so a network blip never blocks a valid lookup — the pipeline's no-filings
+    handling is the backstop. NB: in prod the fetch requires SEC_USER_AGENT on
+    the BACKEND env (not just the worker), or SEC blocks the datacenter request
+    and this permanently fails open (ZZZZZ-style tickers get enqueued)."""
+    global _last_good_tickers
     try:
-        return ticker.upper() in _known_tickers()
+        _last_good_tickers = _known_tickers()
     except Exception as e:  # noqa: BLE001
-        print(f"⚠️  ticker validation skipped (SEC map unavailable): {e}")
+        if _last_good_tickers is not None:
+            print(f"⚠️  SEC map refresh failed ({e}); validating against the "
+                  f"last good map ({len(_last_good_tickers)} tickers).")
+            return ticker.upper() in _last_good_tickers
+        print(f"⚠️  ticker validation skipped (SEC map unavailable, no cached "
+              f"map yet): {e}")
         return True
+    return ticker.upper() in _last_good_tickers
 
 
 @cached(cache=_overview_cache, lock=_cache_lock)

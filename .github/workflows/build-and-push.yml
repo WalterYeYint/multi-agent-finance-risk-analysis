@@ -240,7 +240,12 @@ jobs:
           execution-role-arn: ${{ env.ECS_EXEC_ROLE_ARN }}
           infrastructure-role-arn: ${{ env.ECS_INFRA_ROLE_ARN }}
           container-port: 8000
-          environment-variables: '[{"name":"MODEL_PROVIDER","value":"bedrock"}]'
+          # SEC_USER_AGENT on the BACKEND too (not just the worker): the ticker
+          # front-door validation fetches SEC's ticker→CIK map, and SEC blocks
+          # anonymous datacenter requests — without it validation permanently
+          # fails open and unknown tickers get enqueued. Add SEC_USER_AGENT as a
+          # repo secret (a contact string like "Name email@example.com").
+          environment-variables: '[{"name":"MODEL_PROVIDER","value":"bedrock"},{"name":"SEC_USER_AGENT","value":"${{ secrets.SEC_USER_AGENT }}"}]'
           secrets: '[{"name":"DATABASE_URL","valueFrom":"${{ env.DATABASE_URL_SECRET_ARN }}"},{"name":"OPENAI_API_KEY","valueFrom":"${{ env.OPENAI_KEY_SECRET_ARN }}"},{"name":"POLYGON_API_KEY","valueFrom":"${{ env.POLYGON_KEY_SECRET_ARN }}"}]'
 
       - name: Skip backend deploy (not fully configured)
