@@ -466,6 +466,22 @@ Smaller settings cut this meaningfully:
 | **Default** | 1 vCPU / 2 GB | ~$52/mo |
 | Production-ish (`--cpu 2 --memory 4`) | 2 vCPU / 4 GB | ~$93/mo |
 
+**Resizing a running service.** The CI deploy step (`amazon-ecs-deploy-express-service`) passes image/roles/env but **not** cpu/memory, so size is a property of the Express service itself — set once at creation, preserved across every CI deploy. To change it later, one CLI call. Note the update/describe subcommands take a **service ARN** (only `create` takes a name), and units are vCPU / GB here, unlike the worker task def's CPU-units/MiB:
+
+```bash
+# Find the Express service's ARN (it's a normal ECS service under the hood)
+for c in $(aws ecs list-clusters --region $AWS_REGION --query 'clusterArns[]' --output text); do
+  aws ecs list-services --cluster "$c" --region $AWS_REGION --query 'serviceArns[]' --output text
+done   # → pick the arn containing "$PROJECT-backend"
+
+aws ecs update-express-gateway-service \
+  --service-arn <arn-from-above> \
+  --cpu "512" --memory "1024" \
+  --region $AWS_REGION
+```
+
+This rolls new tasks blue/green (URL unchanged, brief overlap of old+new task billing) and **sticks across future pushes** since CI never re-asserts size. The worker is resized differently — edit `cpu`/`memory` in `task-worker.json`, then register + roll (Step 5d).
+
 > **ALB consolidation.** AWS automatically packs up to 25 Express Mode services behind a single ALB when possible — so if you eventually run multiple Express services in this account, the $16 ALB cost is amortized across them. For a single-service deploy it's a fixed line item.
 
 ## Step 5 — Worker (ECS Fargate)
