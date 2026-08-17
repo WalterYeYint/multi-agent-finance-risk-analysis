@@ -383,4 +383,4 @@ Once these are done, every push to `main` deploys (backend/worker via one workfl
 
 ## 📄 License
 
-This project is licensed under the MIT License - see the LICENSE file for details., technical analysis, and risk assessment.
+This project is **source-available, not open source**: the code is public for viewing, educational reference, and evaluation only. Copying, redistribution, modification, or use in other projects is not permitted without written permission — see the [LICENSE](LICENSE) file for the full terms.
