@@ -10,6 +10,7 @@
       ],
       "Resource": [
         "arn:aws:bedrock:*::foundation-model/anthropic.*",
+        "arn:aws:bedrock:*::foundation-model/amazon.titan-embed-*",
         "arn:aws:bedrock:*:*:inference-profile/*"
       ]
     }

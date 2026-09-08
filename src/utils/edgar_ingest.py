@@ -278,9 +278,14 @@ def _env_limit() -> int:
 def ensure_filings(ticker: str, *, progress_cb=None) -> int:
     """Pipeline pre-flight: make sure `ticker` has SEC filings in the RAG store.
 
-    Fast path (the common case): if the ticker already has stored filings we
-    return immediately and make NO network call. Only on a true cache miss do we
-    hit EDGAR. Any EDGAR / network failure is logged and swallowed — the pipeline
+    Fast path (the common case): if the ticker already has filing chunks under
+    the ACTIVE embedding namespace we return immediately and make NO network
+    call. The check is deliberately namespace-aware, not a bare `filings`-row
+    check: after switching embedding providers (e.g. openai-1536d → Bedrock
+    Titan), old tickers have filings rows but no retrievable chunks — those
+    must fall through to re-ingest (which re-embeds under the new namespace;
+    the per-accession filing rows are reused). Only on a true miss do we hit
+    EDGAR. Any EDGAR / network failure is logged and swallowed — the pipeline
     must still proceed (falling back to local PDFs or running degraded); a flaky
     SEC API must NEVER fail the whole job. Returns the number of filings ingested
     (0 if already present or on error). Forms / limit come from EDGAR_FORMS /
@@ -288,8 +293,15 @@ def ensure_filings(ticker: str, *, progress_cb=None) -> int:
     ticker = ticker.upper()
     try:
         rag = FundamentalRAG()
-        if rag.get_available_filings(ticker):
-            return 0  # already have filings — no network call on the hot path
+        if rag.has_chunks(ticker):
+            return 0  # retrievable under the active embedding model — no network call
+        if rag.embedding_dim == 0:
+            # The embedder itself is broken (probe failed — e.g. a Bedrock IAM
+            # denial): ingest would only fail at the embed step, so don't
+            # re-download from EDGAR on every single run.
+            print(f"⚠️  ensure_filings({ticker}): embedding provider unavailable "
+                  f"(namespace '{rag.embedding_model}') — skipping ingest.")
+            return 0
     except Exception as e:  # noqa: BLE001 - DB hiccup shouldn't fail the run
         print(f"⚠️  ensure_filings: could not check stored filings for {ticker}: {e}")
         return 0

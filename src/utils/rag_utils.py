@@ -289,6 +289,21 @@ class FundamentalRAG:
                 (ticker.upper(), self.embedding_model))
             return "\n".join(row[0] for row in cur.fetchall())
 
+    def has_chunks(self, ticker: str) -> bool:
+        """True if `ticker` has chunks under the ACTIVE embedding namespace.
+
+        Distinct from get_available_filings(), which is namespace-blind: a
+        filing ingested under another provider's embeddings (e.g. openai-1536d)
+        has a `filings` row but zero chunks retrieval can see from this
+        namespace — such a ticker must be re-ingested, not skipped."""
+        ensure_schema()
+        with connect() as conn, conn.cursor() as cur:
+            cur.execute(
+                "SELECT 1 FROM filing_chunks "
+                "WHERE ticker = %s AND embedding_model = %s LIMIT 1",
+                (ticker.upper(), self.embedding_model))
+            return cur.fetchone() is not None
+
     # --------------------------------------------------------------- retrieve
     @staticmethod
     def _build_search_sql(filing_type: Optional[str],
