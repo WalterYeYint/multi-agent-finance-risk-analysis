@@ -47,7 +47,7 @@ REFRESH_SCAN_SECONDS = int(os.getenv("WORKER_REFRESH_SCAN_SECONDS", "300"))
 FILING_SCAN_SECONDS = int(os.getenv("WORKER_FILING_SCAN_SECONDS", str(7 * 24 * 3600)))
 # Soft daily LLM-spend brake: if the last 24h of persisted snapshot costs exceed
 # this, the worker pauses (jobs stay queued) instead of claiming. 0 = disabled.
-DAILY_COST_BUDGET_USD = float(os.getenv("DAILY_COST_BUDGET_USD", "0"))
+DAILY_COST_BUDGET_USD = float(os.getenv("DAILY_COST_BUDGET_USD", "100"))
 # Don't hammer the cost query on every idle poll — re-check every minute.
 _BUDGET_CHECK_SECONDS = 60.0
 
