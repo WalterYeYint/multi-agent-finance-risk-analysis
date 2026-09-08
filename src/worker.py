@@ -42,8 +42,8 @@ from utils.snapshots import (  # noqa: E402
 )
 
 POLL_SECONDS = int(os.getenv("WORKER_POLL_SECONDS", "3"))
-# REFRESH_SCAN_SECONDS = int(os.getenv("WORKER_REFRESH_SCAN_SECONDS", "300"))
-REFRESH_SCAN_SECONDS = int(os.getenv("WORKER_REFRESH_SCAN_SECONDS", "8640000")) # 100 days for temp. dev / test runs
+REFRESH_SCAN_SECONDS = int(os.getenv("WORKER_REFRESH_SCAN_SECONDS", "300"))
+# REFRESH_SCAN_SECONDS = int(os.getenv("WORKER_REFRESH_SCAN_SECONDS", "8640000")) # 100 days for temp. dev / test runs
 # Weekly sweep: re-check every tracked ticker for NEW SEC filings (default 7 days).
 FILING_SCAN_SECONDS = int(os.getenv("WORKER_FILING_SCAN_SECONDS", str(7 * 24 * 3600)))
 # Soft daily LLM-spend brake: if the last 24h of persisted snapshot costs exceed
