@@ -323,9 +323,15 @@ def requeue_orphaned_jobs() -> int:
     failing) lets the interrupted run start over cleanly; started_at is reset
     so the retry gets a fresh timestamp. Returns the number recovered.
 
-    NOTE: only safe to call when no other worker is mid-job — i.e. from worker
-    startup in the current single-worker design. Revisit before ever running
-    multiple workers (would need a started_at staleness cutoff instead)."""
+    ⚠️  SCALING WARNING: only safe while exactly ONE worker exists, called
+    from its startup (no other worker can be mid-job). If the worker service
+    is ever scaled to 2+ tasks — or a rolling deploy overlaps old and new
+    tasks — a booting worker would requeue jobs another worker is actively
+    running, so the same job runs twice (double LLM spend, racing status
+    writes). Before scaling out, replace this blanket requeue with a
+    lease/heartbeat scheme: stamp heartbeat_at on the job row while running
+    (e.g. from the progress callback) and requeue only 'running' jobs whose
+    heartbeat is older than a cutoff."""
     ensure_schema()
     with connect() as conn, conn.cursor() as cur:
         cur.execute(

@@ -15,6 +15,13 @@ In production this is a long-running Fargate task; the scheduled-refresh scan
 can alternatively be triggered by an EventBridge cron hitting
 enqueue_stale_refreshes(). Single-worker / serial by design — one pipeline run at
 a time to avoid hammering the LLM provider.
+
+⚠️  Do NOT scale this service to 2+ tasks as-is: the startup reaper in main()
+requeues every 'running' job on boot, which is only correct while exactly one
+worker exists. With concurrent workers (or an overlapping rolling deploy) a
+booting worker would requeue jobs another worker is mid-run on and the same
+job runs twice. Scaling out first requires a lease/heartbeat scheme — see
+requeue_orphaned_jobs() in utils/snapshots.py.
 """
 
 from __future__ import annotations
@@ -105,6 +112,14 @@ def main() -> int:
     # now is an orphan from a previous worker process that died mid-run (OOM
     # kill, deploy). Without this it would show "processing" forever — the
     # zombie row blocks re-enqueueing and claim_next_job() never picks it up.
+    #
+    # ⚠️  SCALING WARNING: this is only correct with a SINGLE worker. If the
+    # service is ever scaled to 2+ tasks (desiredCount > 1, or an overlapping
+    # rolling deploy), a booting worker would requeue jobs another worker is
+    # actively running → the same job runs twice (double LLM spend, racing
+    # status writes). Before scaling, replace this with a lease/heartbeat
+    # scheme: stamp a heartbeat_at on the job while running and only requeue
+    # 'running' jobs whose heartbeat is older than a cutoff.
     try:
         requeue_orphaned_jobs()
     except Exception as e:  # noqa: BLE001 — recovery must not block startup
