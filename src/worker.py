@@ -38,7 +38,7 @@ from utils.db import ensure_schema  # noqa: E402
 from utils.edgar_ingest import refresh_tracked_filings  # noqa: E402
 from utils.snapshots import (  # noqa: E402
     claim_next_job, enqueue_stale_refreshes, list_tracked_tickers,
-    total_cost_last_24h, update_job_status,
+    requeue_orphaned_jobs, total_cost_last_24h, update_job_status,
 )
 
 POLL_SECONDS = int(os.getenv("WORKER_POLL_SECONDS", "3"))
@@ -101,6 +101,14 @@ def process_job(job: dict) -> None:
 
 def main() -> int:
     ensure_schema()
+    # Startup reaper: this worker is the only one, so any job still 'running'
+    # now is an orphan from a previous worker process that died mid-run (OOM
+    # kill, deploy). Without this it would show "processing" forever — the
+    # zombie row blocks re-enqueueing and claim_next_job() never picks it up.
+    try:
+        requeue_orphaned_jobs()
+    except Exception as e:  # noqa: BLE001 — recovery must not block startup
+        print(f"⚠️  orphaned-job reaper failed (continuing): {e}", flush=True)
     print(f"🛠️  worker started (poll={POLL_SECONDS}s, "
           f"refresh-scan={REFRESH_SCAN_SECONDS}s, "
           f"filing-scan={FILING_SCAN_SECONDS}s). Ctrl-C to stop.", flush=True)

@@ -311,6 +311,39 @@ def claim_next_job() -> Optional[dict]:
     return _job_row_to_dict(row) if row else None
 
 
+def requeue_orphaned_jobs() -> int:
+    """Startup reaper: flip every 'running' job back to 'queued'.
+
+    The worker is a single serial process, so at worker startup ANY job still
+    marked 'running' is an orphan — the previous worker process died before it
+    could write a final status (OOM kill, deploy replacing the task mid-run).
+    Left alone such a job is stuck forever: claim_next_job() only claims
+    'queued' rows, and jobs_pending_uniq blocks re-enqueueing the same
+    (ticker, horizon) while the zombie row exists. Re-queueing (rather than
+    failing) lets the interrupted run start over cleanly; started_at is reset
+    so the retry gets a fresh timestamp. Returns the number recovered.
+
+    NOTE: only safe to call when no other worker is mid-job — i.e. from worker
+    startup in the current single-worker design. Revisit before ever running
+    multiple workers (would need a started_at staleness cutoff instead)."""
+    ensure_schema()
+    with connect() as conn, conn.cursor() as cur:
+        cur.execute(
+            """UPDATE jobs
+                  SET status = 'queued',
+                      started_at = NULL,
+                      progress = 'requeued after worker restart'
+                WHERE status = 'running'
+                RETURNING id, ticker, horizon"""
+        )
+        rows = cur.fetchall()
+        conn.commit()
+    for job_id, ticker, horizon in rows:
+        print(f"♻️  requeued orphaned job {job_id} ({ticker}/{horizon}) — "
+              f"previous worker died mid-run", flush=True)
+    return len(rows)
+
+
 def enqueue_stale_refreshes() -> int:
     """Enqueue refresh jobs for every (ticker, horizon) whose latest snapshot is
     older than its horizon's freshness target. Idempotent via create_job's
