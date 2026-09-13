@@ -1,6 +1,6 @@
-import React, { useMemo } from 'react';
+import React, { useMemo, useState } from 'react';
 import { Link, useParams, useSearchParams } from 'react-router-dom';
-import { ChevronLeft, AlertTriangle } from 'lucide-react';
+import { ChevronLeft, AlertTriangle, RefreshCw } from 'lucide-react';
 import HorizonSummaryStrip from '../components/HorizonSummaryStrip';
 import PriceChart from '../components/PriceChart';
 import HistoryStrip from '../components/HistoryStrip';
@@ -21,13 +21,25 @@ function TickerView() {
   const upperTicker = (ticker || '').toUpperCase();
   // Eager: fan out to all three horizons at once. The user sees a ready horizon
   // immediately even while the other two are still being computed.
-  const { byHorizon, retry } = useAllSnapshots(upperTicker);
+  const { byHorizon, retry, refresh } = useAllSnapshots(upperTicker);
   const active = byHorizon[horizon];
 
   const setHorizon = (h) => {
     const next = new URLSearchParams(searchParams);
     next.set('horizon', h);
     setSearchParams(next, { replace: true });
+  };
+
+  // Manual refresh of the active horizon. A refused refresh (too fresh, rate
+  // limited) keeps the snapshot on screen and shows the reason inline.
+  const [refreshing, setRefreshing] = useState(false);
+  const [refreshNote, setRefreshNote] = useState(null);
+  const onRefresh = async () => {
+    setRefreshing(true);
+    setRefreshNote(null);
+    const err = await refresh(horizon);
+    if (err) setRefreshNote(err);
+    setRefreshing(false);
   };
 
   return (
@@ -83,7 +95,24 @@ function TickerView() {
           </div>
         )}
         {active.status === 'pending' && <PendingView pending={active.pending} />}
-        {active.status === 'ready' && <SnapshotView snapshot={active.snapshot} />}
+        {active.status === 'ready' && (
+          <>
+            <div className="ticker-view__refresh-row">
+              <button
+                type="button"
+                className="ticker-view__refresh-btn"
+                onClick={onRefresh}
+                disabled={refreshing}
+                title="Re-run the analysis for this horizon now"
+              >
+                <RefreshCw size={14} className={refreshing ? 'ticker-view__refresh-spin' : undefined} />
+                {refreshing ? 'Requesting…' : 'Refresh analysis'}
+              </button>
+              {refreshNote && <span className="ticker-view__refresh-note">{refreshNote}</span>}
+            </div>
+            <SnapshotView snapshot={active.snapshot} />
+          </>
+        )}
       </div>
     </div>
   );

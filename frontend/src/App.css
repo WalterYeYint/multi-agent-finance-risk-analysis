@@ -348,6 +348,17 @@ h1, h2, h3, h4 { margin: 0; font-weight: 600; color: var(--text-primary); }
 .snapshot__two-col { display: grid; grid-template-columns: 1fr 1fr; gap: 16px; }
 .snapshot__flags { margin-top: 12px; display: flex; gap: 6px; flex-wrap: wrap; }
 
+/* Manual snapshot refresh (ticker detail page) */
+.ticker-view__refresh-row { display: flex; align-items: center; gap: 12px; margin-bottom: 12px; flex-wrap: wrap; }
+.ticker-view__refresh-btn { display: inline-flex; align-items: center; gap: 7px; padding: 6px 14px;
+  background: var(--surface); color: var(--brand); border: 1px solid var(--border);
+  border-radius: var(--radius); font-size: 0.85rem; font-weight: 600; cursor: pointer; }
+.ticker-view__refresh-btn:hover:not(:disabled) { background: var(--brand-soft); border-color: var(--brand); }
+.ticker-view__refresh-btn:disabled { opacity: 0.6; cursor: default; }
+.ticker-view__refresh-spin { animation: refresh-spin 0.9s linear infinite; }
+@keyframes refresh-spin { to { transform: rotate(360deg); } }
+.ticker-view__refresh-note { font-size: 0.82rem; color: var(--text-muted); }
+
 /* N2: public-analyzer insights */
 .insights__block { margin-top: 14px; }
 .insights__block .snapshot__h4 { display: inline-flex; align-items: center; gap: 6px; }

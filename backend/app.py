@@ -4,6 +4,7 @@ import sys
 import os
 import re
 import time
+from datetime import datetime, timedelta, timezone
 import traceback
 import requests
 import io
@@ -591,6 +592,70 @@ def get_snapshot(ticker, horizon):
     except Exception as e:
         print(traceback.format_exc())
         return jsonify({'error': f'Snapshot failed: {str(e)}'}), 500
+
+
+@app.route('/api/snapshot/<ticker>/<horizon>/refresh', methods=['POST'])
+def refresh_snapshot(ticker, horizon):
+    """User-requested refresh: enqueue a new run even though the current
+    snapshot is still fresh (the read path only enqueues once freshness_hours
+    have passed — this is the explicit \"I want newer data now\" lever).
+
+    Guards, in order:
+      * requires an EXISTING snapshot — refresh only makes sense on a page
+        that's already showing one (also means the ticker is already vetted);
+      * min-age gate: refuses while the snapshot is younger than
+        REFRESH_MIN_AGE_HOURS (default 1, 0 disables) — job dedup only stops
+        concurrent duplicates, this stops one visitor chaining paid runs
+        back-to-back all day;
+      * the same _authorize_enqueue gate as the normal enqueue path (API key
+        when configured + the per-identity hourly rate limit).
+    Idempotent: if a job is already in flight, returns it instead of failing.
+    """
+    try:
+        tkr, err = _clean_ticker(ticker)
+        if err:
+            return err
+        h, err = _parse_horizon(horizon)
+        if err:
+            return err
+
+        snap = get_latest_snapshot(tkr, h.name)
+        if snap is None:
+            return jsonify({
+                'error': f'No snapshot exists yet for {tkr}/{h.name} — request '
+                         f'the ticker normally first.',
+                'code': 'no_snapshot',
+            }), 404
+
+        # Button-mash / in-flight case first: polling an existing job must not
+        # hit the min-age or rate-limit gates (mirrors _resolve_snapshot).
+        existing = find_pending_job(tkr, h.name)
+        if existing is not None:
+            return _job_response(existing)
+
+        min_age_h = float(os.getenv('REFRESH_MIN_AGE_HOURS', '1'))
+        if min_age_h > 0 and snap.get('generated_at'):
+            age = datetime.now(timezone.utc) - snap['generated_at']
+            remaining = timedelta(hours=min_age_h) - age
+            if remaining > timedelta(0):
+                mins = max(1, int(remaining.total_seconds() // 60) + 1)
+                return jsonify({
+                    'error': f'This analysis was generated less than '
+                             f'{min_age_h:g}h ago. Refresh available in '
+                             f'~{mins} min.',
+                    'code': 'too_fresh',
+                    'retry_after_minutes': mins,
+                }), 409
+
+        denied = _authorize_enqueue()
+        if denied:
+            return denied
+
+        job = get_or_create_pending_job(tkr, h.name)
+        return _job_response(job)
+    except Exception as e:
+        print(traceback.format_exc())
+        return jsonify({'error': f'Refresh failed: {str(e)}'}), 500
 
 
 @app.route('/api/snapshot/<ticker>/<horizon>/history', methods=['GET'])
