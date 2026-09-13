@@ -418,9 +418,48 @@ h1, h2, h3, h4 { margin: 0; font-weight: 600; color: var(--text-primary); }
   border-radius: 10px;
   padding: 10px 12px;
 }
-.kpi-cell__label { font-size: 11px; color: var(--text-muted); text-transform: uppercase; letter-spacing: 0.04em; }
+.kpi-cell__label { font-size: 11px; color: var(--text-muted); text-transform: uppercase; letter-spacing: 0.04em;
+  display: flex; align-items: center; gap: 6px; }
 .kpi-cell__value { font-size: 16px; font-weight: 600; margin-top: 4px; }
 .kpi-cell--warning .kpi-cell__value { color: var(--warning); }
+
+/* "?" help badge on KPI cells: explanation shows on hover AND keyboard focus.
+   Pure CSS tooltip rendered from data-tip, anchored below the badge so the
+   first row is never clipped by the top of the section. */
+.kpi-help {
+  position: relative;
+  display: inline-flex; align-items: center; justify-content: center;
+  width: 14px; height: 14px; flex: none;
+  border: 1px solid var(--border); border-radius: 50%;
+  font-size: 9px; font-weight: 700; line-height: 1; text-transform: none; letter-spacing: 0;
+  color: var(--text-muted); background: var(--surface);
+  cursor: help; user-select: none;
+}
+.kpi-help:hover, .kpi-help:focus-visible { color: var(--brand); border-color: var(--brand); outline: none; }
+.kpi-help::after {
+  content: attr(data-tip);
+  position: absolute; top: calc(100% + 7px); left: 50%; transform: translateX(-50%);
+  width: 240px; max-width: calc(100vw - 32px);
+  padding: 8px 10px; border-radius: 8px;
+  background: var(--text-primary); color: #fff;
+  font-size: 12px; font-weight: 400; line-height: 1.45; letter-spacing: 0; text-transform: none; text-align: left;
+  white-space: normal; box-shadow: var(--shadow);
+  /* display:none (not visibility:hidden) — a hidden-but-laid-out bubble on a
+     right-column badge still widens the document and adds horizontal scroll. */
+  display: none; pointer-events: none;
+  z-index: 20;
+}
+.kpi-help::before {
+  content: ''; position: absolute; top: calc(100% + 2px); left: 50%; transform: translateX(-50%);
+  border: 5px solid transparent; border-bottom-color: var(--text-primary);
+  display: none; z-index: 21;
+}
+.kpi-help:hover::after, .kpi-help:focus-visible::after,
+.kpi-help:hover::before, .kpi-help:focus-visible::before { display: block; }
+/* Edge flips (set by KpiCell when a centered bubble would leave the viewport):
+   hang the bubble from the badge's right/left edge; the arrow stays on the badge. */
+.kpi-help--edge-right::after { left: auto; right: -4px; transform: none; }
+.kpi-help--edge-left::after  { left: -4px; right: auto; transform: none; }
 
 /* -------------------------------------------------- horizon summary strip */
 .hsum {

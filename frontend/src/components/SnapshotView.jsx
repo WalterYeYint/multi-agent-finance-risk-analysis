@@ -2,6 +2,7 @@ import React from 'react';
 import ReactMarkdown from 'react-markdown';
 import { Download, FileText } from 'lucide-react';
 import InsightsPanel from './InsightsPanel';
+import KpiCell from './KpiCell';
 import { pickRecommendation, recTone } from '../utils/recommendation';
 
 function pct(v, digits = 1) {
@@ -39,14 +40,21 @@ function downloadPdf(ticker, horizon, base64) {
   URL.revokeObjectURL(url);
 }
 
-function KpiCell({ label, value, tone }) {
-  return (
-    <div className={`kpi-cell${tone ? ` kpi-cell--${tone}` : ''}`}>
-      <div className="kpi-cell__label">{label}</div>
-      <div className="kpi-cell__value">{value}</div>
-    </div>
-  );
-}
+// Hover/focus explanations for the "At a glance" grid. Wording mirrors how each
+// number is actually computed (src/utils/tools.py compute_risk / valuation,
+// src/agents.py risk + fundamental agents) — keep in sync if those change.
+const HELP = {
+  sentiment: 'Overall tone of recent news coverage as judged by the sentiment agent: bullish, bearish, or neutral.',
+  confidence: 'How sure the sentiment agent is of its bullish/bearish call, 0–100%. It is the agent\'s self-reported certainty, not a probability that the stock moves that way.',
+  priceTrend: 'Direction of price over this horizon\'s lookback window: "upward" if the close rose more than 5% start-to-end, "downward" if it fell more than 5%, otherwise "sideways".',
+  volRegime: 'Annualized volatility bucketed: low below 15%, medium 15–30%, high above 30%. Higher regimes mean bigger typical price swings.',
+  annReturn: 'The lookback period\'s total return compounded to a one-year rate (252 trading days). Short windows can produce extreme annualized figures.',
+  annVol: 'Standard deviation of daily returns scaled to one year (× √252). A 40% figure means a typical year sees ±40% swings.',
+  maxDrawdown: 'Largest peak-to-trough fall in the lookback window — what you would have lost buying at the worst high and selling at the following low. Beyond −25% raises a DEEP_DRAWDOWN flag.',
+  var95: 'One-day Value at Risk at 95%: a single-day loss at least this large is expected on roughly 1 in 20 trading days, assuming normally distributed returns.',
+  sharpe: 'Annualized average daily return divided by its volatility (no risk-free rate subtracted). Roughly: above 1 is good return per unit of risk, near 0 is poor, negative means losing money for the risk taken.',
+  health: 'The fundamental agent\'s 0–10 rating of financial health from the latest 10-K/10-Q — profitability, balance sheet strength and cash flow. 10 is strongest.',
+};
 
 function SnapshotView({ snapshot }) {
   const sentiment = snapshot.sentiment || {};
@@ -108,21 +116,22 @@ function SnapshotView({ snapshot }) {
         <div className="kpi-grid">
           <KpiCell
             label="Sentiment"
+            help={HELP.sentiment}
             value={
               <span className={sentimentClass(sentiment.overall_sentiment)}>
                 {sentiment.overall_sentiment || '—'}
               </span>
             }
           />
-          <KpiCell label="Confidence" value={pct(sentiment.confidence_score, 0)} />
-          <KpiCell label="Price trend" value={valuation.price_trend || '—'} />
-          <KpiCell label="Volatility regime" value={valuation.volatility_regime || '—'} />
-          <KpiCell label="Annualized return" value={pct(valuation.annualized_return)} />
-          <KpiCell label="Annualized vol" value={pct(valuation.annualized_volatility)} />
-          <KpiCell label="Max drawdown" value={pct(metrics.max_drawdown)} tone="warning" />
-          <KpiCell label="Daily VaR 95" value={pct(metrics.daily_var_95)} tone="warning" />
-          <KpiCell label="Sharpe-like" value={num(metrics.sharpe_like)} />
-          <KpiCell label="Health score" value={num(fundamental.financial_health_score, 1)} />
+          <KpiCell label="Confidence" help={HELP.confidence} value={pct(sentiment.confidence_score, 0)} />
+          <KpiCell label="Price trend" help={HELP.priceTrend} value={valuation.price_trend || '—'} />
+          <KpiCell label="Volatility regime" help={HELP.volRegime} value={valuation.volatility_regime || '—'} />
+          <KpiCell label="Annualized return" help={HELP.annReturn} value={pct(valuation.annualized_return)} />
+          <KpiCell label="Annualized vol" help={HELP.annVol} value={pct(valuation.annualized_volatility)} />
+          <KpiCell label="Max drawdown" help={HELP.maxDrawdown} value={pct(metrics.max_drawdown)} tone="warning" />
+          <KpiCell label="Daily VaR 95" help={HELP.var95} value={pct(metrics.daily_var_95)} tone="warning" />
+          <KpiCell label="Sharpe-like" help={HELP.sharpe} value={num(metrics.sharpe_like)} />
+          <KpiCell label="Health score" help={HELP.health} value={num(fundamental.financial_health_score, 1)} />
         </div>
         {flags.length > 0 && (
           <div className="snapshot__flags">
