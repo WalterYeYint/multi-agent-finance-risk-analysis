@@ -222,7 +222,25 @@ jobs:
         id: ecr-login
         uses: aws-actions/amazon-ecr-login@v2
 
-      # Backend — ECS Express Mode. The official action wraps
+      # Which stack is live? The Terraform stack (infra/) runs the backend as a
+      # plain ECS service in the finance-agents cluster behind its own ALB; the
+      # hand-built stack runs it as an Express Mode service (default cluster).
+      # Only one exists at a time, so detect instead of configuring.
+      - name: Detect backend deploy target
+        id: target
+        run: |
+          STATUS=$(aws ecs describe-services --cluster "$ECS_CLUSTER" \
+            --services "$ECS_EXPRESS_SERVICE_NAME" \
+            --query 'services[0].status' --output text 2>/dev/null || echo missing)
+          if [ "$STATUS" = "ACTIVE" ]; then
+            echo "terraform=true" >> "$GITHUB_OUTPUT"
+            echo "Backend is the Terraform-managed ECS service — will force-redeploy it."
+          else
+            echo "terraform=false" >> "$GITHUB_OUTPUT"
+            echo "No backend service in $ECS_CLUSTER — using ECS Express Mode."
+          fi
+
+      # Backend — ECS Express Mode (hand-built stack only). The official action wraps
       # create-express-gateway-service / update-express-gateway-service so the same
       # step works on first deploy (creates the service + ALB + URL) and on every
       # subsequent push (rolls a new revision). Idempotent.
@@ -232,7 +250,7 @@ jobs:
       # this run creates it or updates it — the action's update semantics for env
       # preservation are undocumented, so we re-assert rather than rely on them.
       - name: Deploy backend to ECS Express Mode
-        if: env.ECS_EXEC_ROLE_ARN != '' && env.ECS_INFRA_ROLE_ARN != '' && env.DATABASE_URL_SECRET_ARN != '' && env.OPENAI_KEY_SECRET_ARN != '' && env.POLYGON_KEY_SECRET_ARN != ''
+        if: steps.target.outputs.terraform != 'true' && env.ECS_EXEC_ROLE_ARN != '' && env.ECS_INFRA_ROLE_ARN != '' && env.DATABASE_URL_SECRET_ARN != '' && env.OPENAI_KEY_SECRET_ARN != '' && env.POLYGON_KEY_SECRET_ARN != ''
         uses: aws-actions/amazon-ecs-deploy-express-service@v1
         with:
           service-name: ${{ env.ECS_EXPRESS_SERVICE_NAME }}
@@ -249,30 +267,34 @@ jobs:
           secrets: '[{"name":"DATABASE_URL","valueFrom":"${{ env.DATABASE_URL_SECRET_ARN }}"},{"name":"OPENAI_API_KEY","valueFrom":"${{ env.OPENAI_KEY_SECRET_ARN }}"},{"name":"POLYGON_API_KEY","valueFrom":"${{ env.POLYGON_KEY_SECRET_ARN }}"}]'
 
       - name: Skip backend deploy (not fully configured)
-        if: env.ECS_EXEC_ROLE_ARN == '' || env.ECS_INFRA_ROLE_ARN == '' || env.DATABASE_URL_SECRET_ARN == '' || env.OPENAI_KEY_SECRET_ARN == '' || env.POLYGON_KEY_SECRET_ARN == ''
+        if: steps.target.outputs.terraform != 'true' && (env.ECS_EXEC_ROLE_ARN == '' || env.ECS_INFRA_ROLE_ARN == '' || env.DATABASE_URL_SECRET_ARN == '' || env.OPENAI_KEY_SECRET_ARN == '' || env.POLYGON_KEY_SECRET_ARN == '')
         run: |
           echo "::warning::Backend deploy skipped — one or more required secrets are unset:"
           echo "  ECS_EXEC_ROLE_ARN, ECS_INFRA_ROLE_ARN (AWS_DEPLOYMENT.md Step 4a)"
           echo "  DATABASE_URL_SECRET_ARN, OPENAI_KEY_SECRET_ARN, POLYGON_KEY_SECRET_ARN (AWS_DEPLOYMENT.md Step 3.5)"
           echo "Add all five as repo secrets, then re-run."
 
-      # Worker — Fargate doesn't auto-poll ECR. force-new-deployment makes the
-      # service spawn a new task with the freshly-pushed :latest image, then
-      # drain the old one.
-      - name: Force ECS service redeploy (worker)
+      # Worker (both stacks) + backend (Terraform stack) — Fargate doesn't
+      # auto-poll ECR. force-new-deployment makes the service spawn a new task
+      # with the freshly-pushed :latest image, then drain the old one.
+      - name: Force ECS service redeploy
+        env:
+          SERVICES: ${{ steps.target.outputs.terraform == 'true' && format('{0} {1}', env.ECS_SERVICE_WORKER, env.ECS_EXPRESS_SERVICE_NAME) || env.ECS_SERVICE_WORKER }}
         run: |
-          STATUS=$(aws ecs describe-services \
-            --cluster "$ECS_CLUSTER" \
-            --services "$ECS_SERVICE_WORKER" \
-            --query 'services[0].status' --output text 2>/dev/null || echo missing)
-          if [ "$STATUS" != "ACTIVE" ]; then
-            echo "::warning::ECS service $ECS_CLUSTER/$ECS_SERVICE_WORKER not found or not ACTIVE (status: $STATUS) — skipping worker deploy."
-            echo "Create the cluster + service first (AWS_DEPLOYMENT.md Step 5)."
-            exit 0
-          fi
-          DEPLOY_ID=$(aws ecs update-service \
-            --cluster "$ECS_CLUSTER" \
-            --service "$ECS_SERVICE_WORKER" \
-            --force-new-deployment \
-            --query 'service.deployments[0].id' --output text)
-          echo "✓ ECS worker redeploy triggered. DeploymentId: $DEPLOY_ID"
+          for SVC in $SERVICES; do
+            STATUS=$(aws ecs describe-services \
+              --cluster "$ECS_CLUSTER" \
+              --services "$SVC" \
+              --query 'services[0].status' --output text 2>/dev/null || echo missing)
+            if [ "$STATUS" != "ACTIVE" ]; then
+              echo "::warning::ECS service $ECS_CLUSTER/$SVC not found or not ACTIVE (status: $STATUS) — skipping."
+              echo "Create it first (infra/up.sh, or AWS_DEPLOYMENT.md Step 5)."
+              continue
+            fi
+            DEPLOY_ID=$(aws ecs update-service \
+              --cluster "$ECS_CLUSTER" \
+              --service "$SVC" \
+              --force-new-deployment \
+              --query 'service.deployments[0].id' --output text)
+            echo "✓ ECS $SVC redeploy triggered. DeploymentId: $DEPLOY_ID"
+          done
